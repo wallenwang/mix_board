@@ -134,6 +134,14 @@ fn main() {
             // 右边和下边直接跑到屏幕外，用户看到的就是"界面显示不全"。
             // 这里按**当前显示器的逻辑尺寸**夹一遍，并居中显示。
             if let Some(win) = app.get_webview_window("main") {
+                // 标题栏 / 任务栏图标：**显式设一次**。
+                // 光靠 exe 资源里的图标，Windows 有时会沿用旧缓存（同一个 exe 路径改了图标，
+                // 资源管理器还显示老的）。运行时 set_icon 一次，窗口一出现就是新图标。
+                // from_app_icon_resource 直接取打包进二进制的应用图标，不依赖文件路径。
+                if let Ok(img) = tauri::image::Image::from_app_icon_resource(128) {
+                    let _ = win.set_icon(img);
+                }
+
                 let monitor = win
                     .current_monitor()
                     .ok()
