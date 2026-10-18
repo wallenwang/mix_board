@@ -1,0 +1,595 @@
+/* ============================================================================
+ * theme-lumiere.css —— 视觉主题层 v3「浮起的纸」
+ *
+ * 来源：以「Lumière / 栖光之家」那张界面设计稿为风格基准，把它的语言落到本项目：
+ *  · 整个窗口 = 两张圆角卡片浮在暖灰底上（左深墨侧栏 / 右白主区），四周留 10px
+ *  · 主区三栏各自是独立浅色卡片，之间是纯间隙（没有线）
+ *  · 暖白纸感：底色都带一点米调，不是冷灰
+ *  · 强调色是柔和靛蓝；唯一的彩色是那枚紫→珊瑚渐变 CTA
+ *  · 圆角整体加大，阴影极轻，靠底色差分层而不是靠投影
+ *
+ * ⚠️ 这一层必须 **在 styles.css 之后** 导入（main.ts 里保持顺序），靠"后写覆盖"生效。
+ * ⚠️ 只覆盖颜色 / 圆角 / 阴影 / 面 —— **不动任何影响宽高的属性**，不碰分栏公式。
+ *    分栏（flex-grow × 1000、basis 0、分隔条占位）的骨架在 App.vue，这里一个字都不改。
+ * ==========================================================================*/
+
+/* ---------------- 亮色：暖白纸与墨 ---------------- */
+:root {
+  /* 面：底 / 卡片 / 内嵌 / 悬停 / 凹槽 */
+  --bg: #ece9e3;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #f7f5f0;
+  --bg-hover: #f8f6f1;
+  --bg-inset: #f2efe9;
+
+  /* 发丝线与边框：全部带米调，不用冷灰 */
+  --hairline: #efebe4;
+  --hairline-strong: #e5e0d7;
+  --border: #e7e2d9;
+  --border-strong: #d6cfc3;
+
+  /* 墨色：暖黑，不用纯黑也不用蓝黑 */
+  --text: #211f1c;
+  --text-subtle: #8a857c;
+  --text-faint: #b3ada2;
+
+  /* 主色：柔和靛蓝（设计稿里"项目概要"和选中态那一档） */
+  --accent: #5a67c8;
+  --accent-2: #7c88de;
+  --accent-hover: #4b57b4;
+  --accent-soft: rgba(90, 103, 200, 0.1);
+  --accent-faint: rgba(90, 103, 200, 0.05);
+  --accent-ring: rgba(90, 103, 200, 0.28);
+  --accent-fg: #ffffff;
+
+  /* 辅色：暖陶，只做极少量点缀 */
+  --brand-2: #c68a5e;
+  --brand-2-soft: rgba(198, 138, 94, 0.12);
+
+  /* 全应用唯一的彩色：渐变 CTA（紫 → 玫瑰 → 杏） */
+  --grad-cta: linear-gradient(102deg, #8b7be0 0%, #c98ba0 52%, #e4a97e 100%);
+  --grad-cta-hover: linear-gradient(102deg, #8272d8 0%, #c07f95 52%, #dfa173 100%);
+
+  /* 语义色：压低饱和度，跟暖色调和 */
+  --ok: #4f9e74;
+  --warn: #c8913c;
+  --danger: #d2604f;
+
+  /* 圆角：整体比上一版更大 */
+  --radius-xs: 6px;
+  --radius-sm: 9px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-2xl: 26px;
+
+  /* 阴影：极轻，只有"离地 1mm"的程度 */
+  --shadow-ring: 0 0 0 1px rgba(33, 31, 28, 0.055);
+  --shadow-sm: 0 1px 2px rgba(33, 31, 28, 0.04);
+  --shadow: 0 1px 2px rgba(33, 31, 28, 0.04), 0 8px 18px -10px rgba(33, 31, 28, 0.1);
+  --shadow-md: 0 2px 5px rgba(33, 31, 28, 0.05), 0 16px 32px -14px rgba(33, 31, 28, 0.14);
+  --shadow-lg: 0 6px 14px rgba(33, 31, 28, 0.07), 0 32px 64px -22px rgba(33, 31, 28, 0.2);
+  --glow-accent: 0 8px 20px -10px rgba(90, 103, 200, 0.45);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+
+  --bg-soft: rgba(90, 103, 200, 0.07);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI",
+    "PingFang SC", "MiSans", "HarmonyOS Sans SC", "Microsoft YaHei", Roboto, Helvetica, Arial,
+    sans-serif;
+
+  /* 侧栏：深墨（不是蓝黑），带一点暖 */
+  --side-bg: #1b1a18;
+  --side-bg-2: #141312;
+  --side-text: #f2efe9;
+  --side-subtle: #8e8880;
+  --side-border: rgba(255, 255, 255, 0.07);
+  --side-hover: rgba(255, 255, 255, 0.055);
+  --side-active: rgba(255, 255, 255, 0.1);
+  --side-grid: rgba(255, 255, 255, 0.014);
+}
+
+/* ---------------- 暗色：暖灰阶，靠明度差分层 ---------------- */
+html.dark {
+  --bg: #141312;
+  --bg-elevated: #211f1d;
+  --bg-sunken: #1a1917;
+  --bg-hover: #262420;
+  --bg-inset: #171614;
+
+  --hairline: #2a2724;
+  --hairline-strong: #363230;
+  --border: #2e2b27;
+  --border-strong: #403b35;
+
+  --text: #f0ede7;
+  --text-subtle: #9a948a;
+  --text-faint: #6e6860;
+
+  --accent: #9aa5f0;
+  --accent-2: #b3bcff;
+  --accent-hover: #adb7ff;
+  --accent-soft: rgba(154, 165, 240, 0.14);
+  --accent-faint: rgba(154, 165, 240, 0.07);
+  --accent-ring: rgba(154, 165, 240, 0.34);
+  --accent-fg: #16151a;
+
+  --brand-2: #d9a077;
+  --brand-2-soft: rgba(217, 160, 119, 0.14);
+
+  --grad-cta: linear-gradient(102deg, #7d6fd0 0%, #b47c92 52%, #cf9871 100%);
+  --grad-cta-hover: linear-gradient(102deg, #8a7cdc 0%, #c0869c 52%, #dba27b 100%);
+
+  --ok: #5cb98a;
+  --warn: #d8a355;
+  --danger: #e37f6b;
+
+  --shadow-ring: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 12px 28px -14px rgba(0, 0, 0, 0.7);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 20px 44px -18px rgba(0, 0, 0, 0.8);
+  --shadow-lg: 0 10px 26px rgba(0, 0, 0, 0.55), 0 38px 80px -26px rgba(0, 0, 0, 0.85);
+  --glow-accent: 0 8px 22px -10px rgba(154, 165, 240, 0.45);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  --bg-soft: rgba(154, 165, 240, 0.08);
+
+  --side-bg: #100f0e;
+  --side-bg-2: #171614;
+  --side-text: #f0ede7;
+  --side-subtle: #8a847b;
+  --side-border: rgba(255, 255, 255, 0.07);
+  --side-hover: rgba(255, 255, 255, 0.055);
+  --side-active: rgba(255, 255, 255, 0.1);
+  --side-grid: rgba(255, 255, 255, 0.012);
+}
+
+/* ---------------- Element Plus 对齐新主色 ---------------- */
+:root {
+  --el-color-primary: #5a67c8;
+  --el-color-primary-light-3: #8891d8;
+  --el-color-primary-light-5: #a7ade3;
+  --el-color-primary-light-7: #c8cbec;
+  --el-color-primary-light-8: #dcdef3;
+  --el-color-primary-light-9: #f0f1fa;
+  --el-color-primary-dark-2: #4b57b4;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+}
+html.dark {
+  --el-color-primary: #9aa5f0;
+  --el-color-primary-light-3: #7b85c4;
+  --el-color-primary-light-5: #5d6592;
+  --el-color-primary-light-7: #3d4460;
+  --el-color-primary-light-8: #2f3448;
+  --el-color-primary-light-9: #232736;
+  --el-color-primary-dark-2: #b3bcff;
+}
+
+/* ============================================================================
+ * 一、窗口骨架：两张圆角卡片浮在暖灰底上
+ * ==========================================================================*/
+.app-shell {
+  padding: 8px;
+  background: var(--bg);
+}
+
+/* 侧栏成为一张独立的深色卡片（不再贴边） */
+.sidebar {
+  border-radius: var(--radius-xl);
+  border-right: none;
+  background: linear-gradient(168deg, var(--side-bg) 0%, var(--side-bg-2) 100%);
+  overflow: hidden;
+}
+/* 网格纹理几乎去掉，只留极淡一层 —— 设计稿的侧栏是纯色面 */
+.sidebar::before {
+  background-image: none;
+}
+/* 左上角一点极淡光晕，让深色面不是死板一块 */
+.sidebar::after {
+  background: radial-gradient(
+    120% 50% at 0% 0%,
+    rgba(255, 255, 255, 0.055),
+    transparent 60%
+  );
+}
+
+/* 侧栏与主区之间改成纯间隙 */
+.sidebar-divider {
+  width: 6px;
+}
+.sidebar-divider::after {
+  display: none;
+}
+
+/* 主区成为第二张卡 */
+.main {
+  border-radius: var(--radius-xl);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+/* ============================================================================
+ * 二、侧栏内部
+ * ==========================================================================*/
+/* 品牌区改竖排：线框标识在上，品牌名与副标题在下 */
+.sidebar-header {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 18px 16px;
+}
+.sidebar-header::after {
+  display: none;
+}
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  color: var(--side-text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: none;
+}
+.brand-mark svg {
+  width: 20px;
+  height: 20px;
+}
+.brand-name {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  line-height: 1.2;
+}
+.brand-sub {
+  margin-top: 5px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--side-subtle);
+}
+
+/* 项目列表：选中态是一枚浅色胶囊（不再是左侧亮线） */
+.project-list {
+  padding: 6px 10px;
+}
+.project-item {
+  padding: 9px 11px;
+  border-radius: 10px;
+  gap: 10px;
+}
+.project-item .name {
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+.project-item.active {
+  background: var(--side-active);
+  color: var(--side-text);
+  font-weight: 500;
+}
+.project-item.active::before {
+  display: none;
+}
+.project-item .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 3px;
+  box-shadow: none;
+}
+
+/* 新建项目：全应用唯一的渐变 CTA */
+.sidebar-new {
+  padding: 4px 10px 12px;
+}
+.sidebar-new .el-button {
+  width: 100%;
+  height: 38px;
+  border: none !important;
+  border-radius: 11px !important;
+  background: var(--grad-cta) !important;
+  color: #fff !important;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 16px -8px rgba(139, 123, 224, 0.7) !important;
+  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out),
+    filter 0.18s var(--ease-out);
+}
+.sidebar-new .el-button:hover {
+  background: var(--grad-cta-hover) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px -10px rgba(200, 139, 160, 0.75) !important;
+}
+.sidebar-new .el-button:active {
+  transform: translateY(0);
+}
+
+/* 底部功能组与署名：去掉分割线，靠间距分组 */
+.sidebar-footer {
+  padding: 6px 10px 2px;
+}
+.sidebar-footer::before {
+  display: none;
+}
+.footer-btn {
+  padding: 8px 11px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.brand-sign {
+  border-top: none;
+  padding: 8px 18px 16px;
+  gap: 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.brand-sign .sign-sub {
+  padding-left: 0;
+  opacity: 0.55;
+}
+.brand-sign .sign-rule {
+  display: none;
+}
+
+/* ============================================================================
+ * 三、顶栏与分段控件
+ * ==========================================================================*/
+/* 顶栏不再有底线 —— 它和下面同属一张白卡 */
+.main-header::after {
+  display: none;
+}
+
+/* 分段控件：iOS 风胶囊（浅底容器 + 选中白块） */
+.view-switch {
+  padding: 3px;
+  gap: 2px;
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  box-shadow: none;
+}
+.view-switch .pane-toggle {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+.view-switch .pane-toggle:hover {
+  background: transparent;
+  color: var(--text);
+}
+.view-switch .pane-toggle.on,
+.view-switch .pane-toggle.on:hover {
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(33, 31, 28, 0.09), 0 0 0 1px rgba(33, 31, 28, 0.045);
+}
+html.dark .view-switch .pane-toggle.on {
+  background: #33302c;
+  color: var(--text);
+}
+
+/* 幽灵按钮：浅底无边框胶囊（设计稿里右侧那些按钮的形态） */
+.ghost-toggle {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--bg-sunken);
+  color: var(--text-subtle);
+}
+.ghost-toggle:hover {
+  background: var(--bg-inset);
+  border-color: transparent;
+  color: var(--text);
+  transform: none;
+}
+.ghost-toggle.on,
+.ghost-toggle.on:hover {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+
+/* 新建任务：用主色实底（渐变留给侧栏那一个 CTA，避免画面出现两处彩色） */
+.newtask-btn {
+  background: var(--text);
+  border-color: transparent;
+  border-radius: 9px;
+  box-shadow: none;
+}
+.newtask-btn:hover {
+  background: #35322d;
+  box-shadow: 0 4px 12px -6px rgba(33, 31, 28, 0.5);
+}
+html.dark .newtask-btn {
+  background: var(--text);
+  color: #1a1917;
+}
+html.dark .newtask-btn:hover {
+  background: #fff;
+}
+
+/* ============================================================================
+ * 四、看板区（全局规则在 styles.css，这里覆盖形态）
+ * ==========================================================================*/
+.board {
+  padding: 8px 14px 14px;
+  gap: 12px;
+}
+
+/* 列：浅米底 + 大圆角，不再用内阴影勾边 */
+.column {
+  border-radius: 14px;
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.column-header {
+  padding: 12px 13px 8px;
+}
+.column-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.column-count {
+  background: var(--bg-elevated);
+  box-shadow: none;
+  font-size: 10px;
+}
+.column-body {
+  padding: 4px 9px 8px;
+  gap: 8px;
+}
+.column-footer {
+  padding: 4px 9px 10px;
+}
+.add-task-btn {
+  font-size: 12px;
+  border-radius: 9px !important;
+}
+
+/* 任务卡：白纸 + 一枚极细边，圆角对齐新的尺度 */
+.task-card {
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--hairline);
+  box-shadow: 0 1px 2px rgba(33, 31, 28, 0.035);
+}
+.task-card:hover {
+  border-color: var(--border);
+  box-shadow: 0 3px 10px -4px rgba(33, 31, 28, 0.1);
+}
+.task-title {
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+/* ============================================================================
+ * 五、滚动条：暖灰，比冷灰融得进去
+ * ==========================================================================*/
+::-webkit-scrollbar-thumb {
+  background: rgba(33, 31, 28, 0.13);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(33, 31, 28, 0.26);
+}
+
+/* 侧栏里的滚动条保持亮色 */
+.project-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ============================================================================
+ * 六、弹层
+ * ==========================================================================*/
+.el-dialog {
+  border: none;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+.el-dialog__header {
+  border-bottom: 1px solid var(--hairline);
+}
+.el-dialog__title {
+  font-family: var(--font-sans);
+  font-size: 15px !important;
+  font-weight: 650 !important;
+  letter-spacing: 0.01em;
+}
+.el-message-box {
+  border: none;
+  border-radius: var(--radius-lg) !important;
+}
+.el-popper.is-light,
+.el-dropdown__popper {
+  border-radius: var(--radius-md) !important;
+  border-color: var(--hairline) !important;
+}
+.el-button {
+  border-radius: 9px;
+}
+
+/* ============================================================================
+ * 七、收尾微调
+ * ==========================================================================*/
+/* 看板横向滚动条：细、贴底、不抢视线（列数多时它是必要的，只是不该很重） */
+.board::-webkit-scrollbar {
+  height: 7px;
+}
+.board::-webkit-scrollbar-thumb {
+  background: rgba(33, 31, 28, 0.09);
+}
+html.dark .board::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 侧栏底部那三个入口和署名：字号回到可读的尺度 */
+.footer-btn {
+  font-size: 12.5px;
+  padding: 9px 11px;
+}
+.brand-sign {
+  font-size: 10.5px;
+}
+
+/* 写作栏：编辑区是白纸，文档列表保持浅米 —— 跟参考稿的层次一致 */
+.pane-write .editor {
+  background: var(--bg-elevated);
+}
+.pane-write .doc-list {
+  background: transparent;
+}
+
+/* 白板：把画布上那层渐变压掉，让它安静成一张纸 */
+.pane-whiteboard .wb-canvas {
+  background-color: var(--bg-sunken);
+}
+
+/* 列头的小色点：参考稿里是圆点，不是方块 */
+.column .col-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+/* ============================================================================
+ * 八、暗色分层
+ * 暗色下阴影完全看不见，浮起感只能靠「亮发丝环 + 面色明度差」。
+ * 四级顺序：侧栏(最暗) < 列/凹槽 < 页面 < 卡片/头部(最亮)
+ * ==========================================================================*/
+html.dark .sidebar {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.055);
+}
+html.dark .main {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+html.dark .pane {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.052);
+}
+html.dark .column {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+html.dark .task-card {
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow: none;
+}
+html.dark .task-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 12px -6px rgba(0, 0, 0, 0.7);
+}
+html.dark .view-switch {
+  background: #141312;
+}
+html.dark .proj-emoji {
+  background: #2b2926;
+}
+
+/* ============================================================================
+ * 九、块面清晰度
+ * 白卡（主区）与米卡（三栏）色差只有 4~5%，靠一枚稍明显的细环把边界说出来，
+ * 否则 1920 宽屏上三栏会糊成一片。
+ * ⚠️ `.pane` 的这条写在 App.vue 的 scoped 里（那边有同名规则且特异性更高，
+ *    写在这里会被静默吃掉）。
+ * ==========================================================================*/

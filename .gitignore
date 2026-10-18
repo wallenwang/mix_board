@@ -1,0 +1,36 @@
+# ---- 依赖 / 构建产物（各自 npm install / cargo build 生成，不进仓库）----
+node_modules/
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# ---- 打包出来的可执行文件：自己构建 ----
+*.exe
+工作看板.exe
+旧版本/
+
+# ---- 本地调试 / 验证产物 ----
+shots/
+.playwright-mcp/
+*.log
+diag.log
+
+# ---- 本地开发辅助脚本（GBK 编码，仅本机可用）----
+启动工作看板.cmd
+
+# ---- 内部笔记与记忆（含个人与项目内情，不公开）----
+.workbuddy/
+*.local.md
+
+# ---- 数据文件（应用数据存在用户目录，万一误放仓库也不要提交）----
+*.db
+*.db-wal
+*.db-shm
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

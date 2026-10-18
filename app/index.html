@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23409EFF'/%3E%3Crect x='7' y='9' width='18' height='3.4' rx='1.7' fill='white'/%3E%3Crect x='7' y='14.3' width='13' height='3.4' rx='1.7' fill='white' opacity='.85'/%3E%3Crect x='7' y='19.6' width='16' height='3.4' rx='1.7' fill='white' opacity='.7'/%3E%3C/svg%3E"
+    />
+    <title>工作看板</title>
+    <!-- 启动画面：窗口一出现就能看到这个（纯 HTML/CSS，不依赖 JS 打包），
+         避免"白屏/黑屏几秒"。main.ts 挂载完成后把它淡出移除。 -->
+    <style>
+      html, body { margin: 0; background: #ece9e3; }
+      #splash {
+        position: fixed; inset: 0; z-index: 9998;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; background: #ece9e3;
+        font-family: "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+        transition: opacity .28s ease;
+      }
+      #splash.gone { opacity: 0; pointer-events: none; }
+      #splash .sp-mark {
+        width: 52px; height: 52px; border-radius: 15px;
+        background: linear-gradient(150deg, #5a67c8, #1b47ab);
+        box-shadow: 0 10px 26px -10px rgba(90, 103, 200, .75);
+        display: flex; align-items: center; justify-content: center;
+      }
+      #splash .sp-mark i {
+        display: block; width: 24px; height: 3px; border-radius: 2px; background: #fff;
+        box-shadow: 0 7px 0 #fff, 0 14px 0 rgba(255, 255, 255, .72);
+        margin-top: -14px;
+      }
+      #splash .sp-name {
+        font-size: 15px; letter-spacing: .16em; color: #211f1c; font-weight: 600;
+      }
+      #splash .sp-bar {
+        width: 92px; height: 3px; border-radius: 999px; background: rgba(33, 31, 28, .1);
+        overflow: hidden;
+      }
+      #splash .sp-bar i {
+        display: block; width: 40%; height: 100%; border-radius: 999px; background: #5a67c8;
+        animation: sp-slide 1.1s ease-in-out infinite;
+      }
+      @keyframes sp-slide {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(250%); }
+      }
+    </style>
+    <script>
+      // 排查用：把前端运行期错误直接画在页面上（Tauri 里看不到 console）
+      (function () {
+        // 贴在窗口底部的一条错误提示，点一下可收起 —— 不要全屏盖住界面，
+        // 否则一旦有报错，用户连点都点不了。
+        function show(kind, msg, extra) {
+          var el = document.getElementById("__err");
+          if (!el) {
+            el = document.createElement("pre");
+            el.id = "__err";
+            el.style.cssText =
+              "position:fixed;left:0;right:0;bottom:0;max-height:36vh;z-index:99999;margin:0;" +
+              "padding:10px 14px;overflow:auto;background:#fff5f5;color:#c00;" +
+              "border-top:2px solid #f56c6c;" +
+              "font:12.5px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;cursor:pointer";
+            el.title = "点一下收起";
+            el.addEventListener("click", function () {
+              el.style.display = "none";
+            });
+            (document.body || document.documentElement).appendChild(el);
+          }
+          el.style.display = "";
+          el.textContent += "[" + kind + "] " + msg + "\n" + (extra || "") + "\n\n";
+        }
+        window.addEventListener("error", function (e) {
+          var msg = e.message || "";
+          // ResizeObserver 的「循环通知」是浏览器在尺寸变化时的良性提示，不是真错误
+          if (/ResizeObserver loop/i.test(msg)) return;
+          show("error", msg || "(no message)",
+            (e.error && e.error.stack) || (e.filename + ":" + e.lineno + ":" + e.colno));
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          show("reject", (r && (r.message || String(r))) || "(no reason)", (r && r.stack) || "");
+        });
+        window.addEventListener("DOMContentLoaded", function () {
+          setTimeout(function () {
+            var app = document.getElementById("app");
+            if (app && app.children.length === 0) {
+              show("blank", "DOM ready 后 #app 仍为空 —— main.ts 可能没执行成功", "");
+            }
+          }, 4000);
+        });
+      })();
+
+      // 页面新鲜度自检：开发服务器提供 /__stamp（源码最新修改时间）。
+      // 一旦它变了而页面没跟着更新，说明热更新断了 —— 直接提示刷新，
+      // 免得出现「这边已经改好了、那边还是老代码」的扯皮。
+      // 另外：**开发服务器整体挂掉**时，页面会永远停在旧代码且毫无提示，
+      // 这比"热更新断了"更坑（曾经因此让人对着旧界面排查半天），所以这里也要报警。
+      (function () {
+        // 只在开发服务器下跑：生产包（tauri.localhost）拿不到 /__stamp，
+        // 以前每 10 秒失败一次、还会在右下角留下"开发服务器已断开"的红条。
+        var host = location.hostname;
+        if (host !== "127.0.0.1" && host !== "localhost") return;
+        var known = null;
+        var bar = null;
+        var offBar = null;
+
+        function fmt(ms) {
+          var d = new Date(Number(ms));
+          if (isNaN(d.getTime())) return "";
+          var p = function (n) { return n < 10 ? "0" + n : "" + n; };
+          return p(d.getHours()) + ":" + p(d.getMinutes());
+        }
+
+        function tag(text) {
+          var el = document.getElementById("__stamp");
+          if (!el) {
+            el = document.createElement("div");
+            el.id = "__stamp";
+            el.style.cssText =
+              "position:fixed;right:8px;bottom:5px;z-index:9997;font:11px ui-monospace,Consolas,monospace;" +
+              "color:#98a2b3;background:rgba(255,255,255,.72);padding:0 6px;border-radius:6px;" +
+              "pointer-events:none;user-select:none";
+            (document.body || document.documentElement).appendChild(el);
+          }
+          el.textContent = text;
+        }
+
+        function makeBar(color, text) {
+          var b = document.createElement("div");
+          b.style.cssText =
+            "position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:9999;" +
+            "background:" + color + ";color:#fff;font:13px system-ui;padding:8px 16px;" +
+            "border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.22);cursor:pointer";
+          b.textContent = text;
+          b.onclick = function () { location.reload(); };
+          (document.body || document.documentElement).appendChild(b);
+          return b;
+        }
+
+        function warn() {
+          if (bar) return;
+          bar = makeBar("#e6a23c", "代码已更新，点这里刷新页面 ⟳");
+        }
+
+        function offline() {
+          tag("开发服务器已断开");
+          if (offBar) return;
+          offBar = makeBar("#f56c6c", "⚠️ 开发服务器已断开，这页是旧代码 —— 点这里重试");
+        }
+        function online() {
+          if (!offBar) return;
+          offBar.remove();
+          offBar = null;
+        }
+
+        function check() {
+          fetch("/__stamp?t=" + Date.now(), { cache: "no-store" })
+            .then(function (r) { return r.ok ? r.text() : ""; })
+            .then(function (v) {
+              v = (v || "").trim();
+              if (!v) { offline(); return; }
+              if (known !== null && v !== known) warn();
+              known = v;
+              tag("页面代码 " + fmt(v));
+              online();
+            })
+            .catch(function () { offline(); });
+        }
+
+        check();
+        setInterval(check, 10000);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="splash">
+      <div class="sp-mark"><i></i></div>
+      <div class="sp-name">工作看板</div>
+      <div class="sp-bar"><i></i></div>
+    </div>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
