@@ -20,10 +20,14 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue"
 import { api } from "../api";
 import { reportError } from "../diag";
 
-const props = withDefaults(defineProps<{ compact?: boolean; active?: boolean }>(), {
-  compact: false,
-  active: true,
-});
+const props = withDefaults(
+  defineProps<{ compact?: boolean; active?: boolean; dragging?: boolean }>(),
+  {
+    compact: false,
+    active: true,
+    dragging: false,
+  }
+);
 
 const ZOOM_STEPS = [0.8, 0.9, 1, 1.15, 1.3, 1.5];
 const STORE_KEY = "kanban.webpane";
@@ -258,6 +262,39 @@ function applyZoom() {
   if (nativeOk.value && nativeCreated) void api.floatWebZoom(zoom.value);
 }
 
+/**
+ * 拖动/缩放**进行中**：把原生网页视图临时藏起来。
+ *
+ * 为什么：网页视图是独立的内核图层，每帧改一次位置都要整体重绘，
+ * 拖起来必然"内容追不上框"（试过 30fps→60fps、两次调用→set_bounds，都还是黏）。
+ * 拖动这零点几秒里改用一块轻量占位（标题 + 当前域名），框本身跑满 60fps，
+ * 松手瞬间把网页贴回原位 —— 手感干脆，也不会出现错位。
+ */
+watch(
+  () => props.dragging,
+  (drag) => {
+    if (!nativeOk.value || !nativeCreated) return;
+    if (drag) {
+      stopFollow();
+      void api.floatWebVisible(false);
+    } else {
+      void (async () => {
+        await syncBounds();
+        if (props.active) void api.floatWebVisible(true);
+        startFollow();
+      })();
+    }
+  }
+);
+
+function hostOf(u: string): string {
+  try {
+    return new URL(u).host;
+  } catch {
+    return u;
+  }
+}
+
 /** 浮动窗收起/展开时同步可见性（原生视图不会跟着 v-show 消失） */
 watch(
   () => props.active,
@@ -330,8 +367,14 @@ defineExpose({ go, openExternal });
     </div>
 
     <div ref="boxRef" class="wp-frame-wrap">
+      <!-- 拖动/缩放中：原生视图已临时隐藏，这里用一块轻占位顶上 -->
+      <div v-if="props.dragging && frameSrc" class="wp-dragph">
+        <div class="ph-ico">🌐</div>
+        <div class="ph-host">{{ hostOf(frameSrc) }}</div>
+        <div class="ph-tip">松手后继续显示网页</div>
+      </div>
       <!-- 原生模式：真正的网页由子 webview 铺在这块区域上，这里只放空位 -->
-      <div v-if="nativeOk && frameSrc" class="wp-native"></div>
+      <div v-else-if="nativeOk && frameSrc" class="wp-native"></div>
       <iframe
         v-else-if="frameSrc"
         :key="frameKey"
@@ -485,5 +528,35 @@ defineExpose({ go, openExternal });
 .wp-native {
   position: absolute;
   inset: 0;
+}
+
+/* 拖动中的占位：轻量、无重绘负担 */
+.wp-dragph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--bg-sunken, #f3f1ec);
+  color: var(--text-subtle, #8a857c);
+  user-select: none;
+}
+.wp-dragph .ph-ico {
+  font-size: 30px;
+  opacity: 0.5;
+}
+.wp-dragph .ph-host {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #2b2822);
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wp-dragph .ph-tip {
+  font-size: 11.5px;
 }
 </style>

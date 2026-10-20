@@ -90,11 +90,15 @@ watch([x, y, w, h, maxed], () => {
  * 拖起来发涩；这里攒到**每帧只应用一次**（rAF 节流），
  * 同时让里面的原生网页视图（按帧读位置）能和窗口严丝合缝地一起走。
  */
+/** 正在拖动/缩放（用来让里面的原生网页视图临时让位，见 WebPane 的说明） */
+const dragging = ref(false);
+
 function dragBar(cursor: string, onMove: (ev: PointerEvent) => void) {
   const prevCursor = document.body.style.cursor;
   const prevSelect = document.body.style.userSelect;
   document.body.style.cursor = cursor;
   document.body.style.userSelect = "none";
+  dragging.value = true;
 
   let pending: PointerEvent | null = null;
   let raf = 0;
@@ -114,6 +118,7 @@ function dragBar(cursor: string, onMove: (ev: PointerEvent) => void) {
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     pending = null;
+    dragging.value = false;
     document.body.style.cursor = prevCursor;
     document.body.style.userSelect = prevSelect;
     window.removeEventListener("pointermove", move);
@@ -212,7 +217,7 @@ onBeforeUnmount(() => window.clearTimeout(unmountTimer));
       </div>
       <div class="fw-body">
         <!-- 懒加载：没见过浮窗就完全不创建（见 paneMounted 的注释） -->
-        <WebPane v-if="paneMounted" :active="open" compact />
+        <WebPane v-if="paneMounted" :active="open" :dragging="dragging" compact />
         <div v-else class="fw-placeholder">网页会在第一次打开时加载</div>
       </div>
       <div class="fw-grip" title="拖动改变大小" @pointerdown="startResize"></div>
