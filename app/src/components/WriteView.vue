@@ -770,7 +770,7 @@ async function insertIntoCurrentDoc(rawMd: string, docId: number | null) {
 </script>
 
 <template>
-  <div class="write">
+  <div class="write" :style="docStyle">
     <aside class="doc-list">
       <div class="dl-head">
         <span class="dl-count">文档 · {{ store.docs.length }}</span>
@@ -814,7 +814,7 @@ async function insertIntoCurrentDoc(rawMd: string, docId: number | null) {
       </div>
     </aside>
 
-    <section v-if="current" class="editor" :style="docStyle">
+    <section v-if="current" class="editor">
       <div class="ed-head">
         <input v-model="title" class="ed-title" placeholder="文档标题" @input="scheduleSave" />
         <span class="ed-stat">{{ stats }}</span>
@@ -1601,5 +1601,83 @@ export default { name: "WriteView" };
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---------------------------------------------------------------
+   底色作用于**整个文档栏**：左侧列表 + 顶部标题 + 格式条 + 正文一体，
+   不再只染中间那块文字区（看起来更像"一页纸"，也和白板/看板的面板一致）。
+   --doc-bg / --doc-ink 挂在外层 .write 上，这里只负责"别挡住它"。
+   --------------------------------------------------------------- */
+.write {
+  background: var(--doc-bg);
+  color: var(--doc-ink, var(--text));
+}
+.write .doc-list,
+.write .ed-head,
+.write .ed-tools,
+.write .ed-body,
+.write .ed-ta,
+.write .ed-prev {
+  background: transparent;
+}
+/* 分隔线改用"半透明墨色"，落在任何底色上都不突兀 */
+.write .doc-list {
+  border-right: 1px solid rgba(127, 127, 127, 0.24);
+}
+.write .dl-head {
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+.write .ed-tools {
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+}
+/* 列表里的文字跟着底色走（深色底自动变浅字，浅色底变深字） */
+.write .dl-count,
+.write .dl-tip {
+  color: var(--doc-ink, var(--text));
+  opacity: 0.62;
+}
+.write .dl-item {
+  color: var(--doc-ink, var(--text));
+}
+.write .dl-item.on {
+  background: rgba(127, 127, 127, 0.16);
+}
+/* 格式条上的按钮：不用主题底色，免得在绿底/深底上显出一块白 */
+.write .ed-tools .ft {
+  background: rgba(127, 127, 127, 0.1);
+  color: var(--doc-ink, var(--text));
+  border-color: rgba(127, 127, 127, 0.22);
+}
+.write .ed-tools .ft:hover {
+  background: rgba(127, 127, 127, 0.18);
+}
+/* 工具条上的 Element 按钮（看板任务 / 插入图片 / 导出…）同样融入底色 */
+.write .ed-tools :deep(.el-button) {
+  background: rgba(127, 127, 127, 0.1);
+  border-color: rgba(127, 127, 127, 0.22);
+  color: var(--doc-ink, var(--text));
+}
+.write .ed-tools :deep(.el-button:hover) {
+  background: rgba(127, 127, 127, 0.18);
+  border-color: rgba(127, 127, 127, 0.3);
+  color: var(--doc-ink, var(--text));
+}
+.write .ed-tools :deep(.el-button--primary) {
+  background: rgba(90, 103, 200, 0.92);
+  border-color: transparent;
+  color: #fff;
+}
+/* 列表里的小按钮（＋新建 等）也跟着底色走，别在绿底上冒白块 */
+.write .dl-new,
+.write .dl-item .dl-count2 {
+  background: rgba(127, 127, 127, 0.1);
+  border-color: rgba(127, 127, 127, 0.22);
+  color: var(--doc-ink, var(--text));
+}
+/* Vditor 自己的白底也要让开，否则正文区会露出一块 */
+.write .ed-body :deep(.vditor),
+.write .ed-body :deep(.vditor-reset),
+.write .ed-body :deep(.vditor-wysiwyg pre.vditor-reset) {
+  background: transparent;
 }
 </style>
