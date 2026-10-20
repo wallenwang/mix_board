@@ -101,7 +101,6 @@ function onResize() {
  */
 let rafId = 0;
 let lastRect = { x: -1, y: -1, w: -1, h: -1 };
-let lastPush = 0;
 
 function startFollow() {
   if (rafId) return;
@@ -118,16 +117,16 @@ function followTick() {
   if (!props.active || !nativeOk.value || !nativeCreated) return;
   const r = rectOf();
   if (!r) return;
-  const moved =
-    Math.abs(r.x - lastRect.x) > 0 ||
-    Math.abs(r.y - lastRect.y) > 0 ||
-    Math.abs(r.w - lastRect.w) > 0 ||
-    Math.abs(r.h - lastRect.h) > 0;
-  if (!moved) return;
-  // 拖动时每帧都发 IPC 有点浪费，~30fps 足够跟手
-  const now = performance.now();
-  if (now - lastPush < 30) return;
-  lastPush = now;
+  if (
+    r.x === lastRect.x &&
+    r.y === lastRect.y &&
+    r.w === lastRect.w &&
+    r.h === lastRect.h
+  ) {
+    return;
+  }
+  // 不节流：拖动时每帧都推。Rust 侧用一次 set_bounds 完成，
+  // 早先压到 30fps 反而让画面"追不上"手指（用户实测嫌不跟手）。
   lastRect = r;
   void api.floatWebBounds(r.x, r.y, r.w, r.h).catch(() => {
     /* 窗口正在销毁时的报错忽略 */

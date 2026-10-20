@@ -1766,8 +1766,13 @@ pub async fn float_web_open(
     let target = parse_url(&url)?;
 
     if let Some(wv) = app.get_webview("float") {
-        wv.set_position(LogicalPosition::new(x, y)).map_err(map_err)?;
-        wv.set_size(LogicalSize::new(w, h)).map_err(map_err)?;
+        // set_bounds 一次把位置和尺寸都设掉：拖动时每秒可能调 60 次，
+        // 分两次 set_position + set_size 会明显发沉
+        wv.set_bounds(tauri::Rect {
+            position: tauri::Position::Logical(LogicalPosition::new(x, y)),
+            size: tauri::Size::Logical(LogicalSize::new(w, h)),
+        })
+        .map_err(map_err)?;
         wv.navigate(target).map_err(map_err)?;
         let _ = wv.show();
         return Ok(());
@@ -1790,7 +1795,7 @@ pub async fn float_web_open(
     Ok(())
 }
 
-/// 跟随浮动窗拖动/缩放更新位置尺寸
+/// 跟随浮动窗拖动/缩放更新位置尺寸（拖动时每帧都会调，务必一次到位）
 #[tauri::command]
 pub fn float_web_bounds(
     app: AppHandle,
@@ -1800,8 +1805,11 @@ pub fn float_web_bounds(
     h: f64,
 ) -> Result<(), String> {
     if let Some(wv) = app.get_webview("float") {
-        wv.set_position(LogicalPosition::new(x, y)).map_err(map_err)?;
-        wv.set_size(LogicalSize::new(w, h)).map_err(map_err)?;
+        wv.set_bounds(tauri::Rect {
+            position: tauri::Position::Logical(LogicalPosition::new(x, y)),
+            size: tauri::Size::Logical(LogicalSize::new(w, h)),
+        })
+        .map_err(map_err)?;
     }
     Ok(())
 }

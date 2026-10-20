@@ -83,19 +83,46 @@ watch([x, y, w, h, maxed], () => {
   }, 300);
 });
 
+/**
+ * 拖动/缩放的通用壳子。
+ *
+ * ⚠️ pointermove 一帧可能触发多次，直接改坐标会让 Vue 反复 diff + 重排，
+ * 拖起来发涩；这里攒到**每帧只应用一次**（rAF 节流），
+ * 同时让里面的原生网页视图（按帧读位置）能和窗口严丝合缝地一起走。
+ */
 function dragBar(cursor: string, onMove: (ev: PointerEvent) => void) {
   const prevCursor = document.body.style.cursor;
   const prevSelect = document.body.style.userSelect;
   document.body.style.cursor = cursor;
   document.body.style.userSelect = "none";
+
+  let pending: PointerEvent | null = null;
+  let raf = 0;
+  const tick = () => {
+    raf = 0;
+    if (pending) {
+      const ev = pending;
+      pending = null;
+      onMove(ev);
+    }
+  };
+  const move = (ev: PointerEvent) => {
+    pending = ev;
+    if (!raf) raf = requestAnimationFrame(tick);
+  };
   const up = () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    pending = null;
     document.body.style.cursor = prevCursor;
     document.body.style.userSelect = prevSelect;
-    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
   };
-  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
 }
 
 /** 拖标题栏移动 */
