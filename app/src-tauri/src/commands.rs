@@ -2,7 +2,10 @@ use crate::db::Db;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::State;
+use tauri::{
+    webview::{NewWindowResponse, WebviewBuilder},
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, WebviewUrl,
+};
 
 fn map_err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -1735,6 +1738,106 @@ pub fn get_data_dir(dir: State<DataDir>) -> Result<String, String> {
 pub fn perf_probe(dir: State<DataDir>, line: String) -> Result<(), String> {
     let p = dir.root().join("perf.log");
     crate::diag::append(&p, &line);
+    Ok(())
+}
+
+// ---------------- 浮动网页（子 webview，不是 iframe） ----------------
+//
+// 为什么不用 iframe：豆包、Bing 结果页这类站点会用 CSP `frame-ancestors` /
+// `X-Frame-Options` 禁止被第三方嵌入；而且 iframe 里 `target=_blank` 的链接
+// 会被拦下后**没有任何反应**——用户看到的就是"点了进不去网站"。
+// 子 webview 是独立的内核视图，这两条限制都不存在；`on_new_window` 里再把
+// 新窗口请求改成"在当前浮动网页里打开"，点搜索结果就能正常跳转。
+
+fn parse_url(u: &str) -> Result<tauri::Url, String> {
+    u.parse::<tauri::Url>().map_err(|_| format!("网址不对：{u}"))
+}
+
+/// 打开（或复用）浮动网页视图，并把它摆到 x,y,w,h（CSS 像素 = 逻辑像素）
+#[tauri::command]
+pub async fn float_web_open(
+    app: AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    let target = parse_url(&url)?;
+
+    if let Some(wv) = app.get_webview("float") {
+        wv.set_position(LogicalPosition::new(x, y)).map_err(map_err)?;
+        wv.set_size(LogicalSize::new(w, h)).map_err(map_err)?;
+        wv.navigate(target).map_err(map_err)?;
+        let _ = wv.show();
+        return Ok(());
+    }
+
+    let win = app.get_window("main").ok_or("主窗口不存在")?;
+    let handle = app.clone();
+    let builder = WebviewBuilder::new("float", WebviewUrl::External(target)).on_new_window(
+        move |u, _features| {
+            // 新窗口请求（target=_blank / window.open）→ 就在当前浮动网页里打开
+            if let Some(wv) = handle.get_webview("float") {
+                let _ = wv.navigate(u);
+            }
+            NewWindowResponse::Deny
+        },
+    );
+
+    win.add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h))
+        .map_err(|e| format!("打开浮动网页失败：{e}"))?;
+    Ok(())
+}
+
+/// 跟随浮动窗拖动/缩放更新位置尺寸
+#[tauri::command]
+pub fn float_web_bounds(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    if let Some(wv) = app.get_webview("float") {
+        wv.set_position(LogicalPosition::new(x, y)).map_err(map_err)?;
+        wv.set_size(LogicalSize::new(w, h)).map_err(map_err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn float_web_navigate(app: AppHandle, url: String) -> Result<(), String> {
+    let target = parse_url(&url)?;
+    if let Some(wv) = app.get_webview("float") {
+        wv.navigate(target).map_err(map_err)?;
+    }
+    Ok(())
+}
+
+/// 收起浮动窗时子 webview 不会跟着 v-show 消失，必须显式隐藏
+#[tauri::command]
+pub fn float_web_visible(app: AppHandle, on: bool) -> Result<(), String> {
+    if let Some(wv) = app.get_webview("float") {
+        let r = if on { wv.show() } else { wv.hide() };
+        r.map_err(map_err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn float_web_close(app: AppHandle) -> Result<(), String> {
+    if let Some(wv) = app.get_webview("float") {
+        let _ = wv.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn float_web_set_zoom(app: AppHandle, zoom: f64) -> Result<(), String> {
+    if let Some(wv) = app.get_webview("float") {
+        wv.set_zoom(zoom).map_err(map_err)?;
+    }
     Ok(())
 }
 

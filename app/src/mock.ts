@@ -525,6 +525,29 @@ const apiImpl = {
   async perfProbe(line: string) {
     console.log("[perf]", line);
   },
+
+  /**
+   * 浮动网页：浏览器预览里没有子 webview，直接抛错让 WebPane 退回 iframe 模式。
+   * （抛错是故意的 —— WebPane 收到异常会自动切到 iframe，界面照样能用）
+   */
+  async floatWebOpen() {
+    throw new Error("浏览器预览模式没有原生网页视图");
+  },
+  async floatWebBounds() {
+    /* 空操作 */
+  },
+  async floatWebNavigate() {
+    /* 空操作 */
+  },
+  async floatWebVisible() {
+    /* 空操作 */
+  },
+  async floatWebClose() {
+    /* 空操作 */
+  },
+  async floatWebZoom() {
+    /* 空操作 */
+  },
 };
 
 // ---------------------------------------------------------------

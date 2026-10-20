@@ -184,8 +184,8 @@ onBeforeUnmount(() => window.clearTimeout(unmountTimer));
         </div>
       </div>
       <div class="fw-body">
-        <!-- 懒加载：没见过浮窗就完全不创建 iframe（见 paneMounted 的注释） -->
-        <WebPane v-if="paneMounted" compact />
+        <!-- 懒加载：没见过浮窗就完全不创建（见 paneMounted 的注释） -->
+        <WebPane v-if="paneMounted" :active="open" compact />
         <div v-else class="fw-placeholder">网页会在第一次打开时加载</div>
       </div>
       <div class="fw-grip" title="拖动改变大小" @pointerdown="startResize"></div>

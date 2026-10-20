@@ -1131,9 +1131,21 @@ const NODE_TYPES: { kind: NodeKind; label: string; hint: string }[] = [
   { kind: "text", label: "文字", hint: "纯文字标签" },
   { kind: "mind", label: "思维导图", hint: "继续长分支" },
   { kind: "box", label: "分组框", hint: "圈一块分区" },
+  { kind: "file", label: "图片 / 资料", hint: "上传一张图，自动连上" },
   { kind: "doc", label: "文档", hint: "新建一篇 Markdown" },
   { kind: "gantt", label: "甘特图", hint: "看时间轴进度" },
 ];
+
+/**
+ * 端点拖到空白 → 选「图片 / 资料」时，先弹文件选择框。
+ * 选好文件后再建成图片节点并连回原来的节点（这里暂存菜单的位置与连线方向）。
+ */
+const portFileOpen = ref(false);
+const portFileCtx = ref<{
+  wx: number;
+  wy: number;
+  from: { kind: "task" | "note"; id: number; role: "in" | "out" };
+} | null>(null);
 
 function openTypeMenu(
   clientX: number,
@@ -1153,6 +1165,12 @@ async function createFromTypeMenu(kind: NodeKind) {
   const m = typeMenu.value;
   typeMenu.value = null;
   if (!m || store.currentProjectId == null) return;
+  // 图片/资料要先让用户选文件，选完再建节点（位置与连线方向先存着）
+  if (kind === "file") {
+    portFileCtx.value = { wx: m.wx, wy: m.wy, from: m.from };
+    portFileOpen.value = true;
+    return;
+  }
   let nid: number | null = null;
   if (kind === "doc") {
     try {
@@ -1175,6 +1193,23 @@ async function createFromTypeMenu(kind: NodeKind) {
   if (nid == null) return;
   if (m.from.role === "out") await connect(m.from, { kind: "note", id: nid });
   else await connect({ kind: "note", id: nid }, m.from);
+  await store.refreshBoard();
+}
+
+/** 端口菜单选了「图片 / 资料」→ 用户选完文件，建成图片节点并连回原节点 */
+async function onPortFilePicked(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  const ctx = portFileCtx.value;
+  portFileOpen.value = false;
+  portFileCtx.value = null;
+  if (!ctx || !files.length) return;
+  const ids = await importFiles(files, { x: ctx.wx, y: ctx.wy });
+  const nid = ids[0];
+  if (nid == null) return;
+  if (ctx.from.role === "out") await connect(ctx.from, { kind: "note", id: nid });
+  else await connect({ kind: "note", id: nid }, ctx.from);
   await store.refreshBoard();
 }
 
@@ -2676,13 +2711,14 @@ async function uploadOne(pid: number, f: File) {
   return { rec, ...size };
 }
 
-async function importFiles(files: File[], at?: { x: number; y: number }) {
+async function importFiles(files: File[], at?: { x: number; y: number }): Promise<number[]> {
   const pid = store.currentProjectId;
   if (pid == null) {
     ElMessage.warning("先在左侧选一个项目，再把资料放上来");
-    return;
+    return [];
   }
   let placed = 0;
+  const made: number[] = [];
   const p0 = at ?? centerOfView();
   const startX = Math.round(p0.x - 80);
   const cursor = { x: startX, y: Math.round(p0.y - 40) };
@@ -2713,12 +2749,14 @@ async function importFiles(files: File[], at?: { x: number; y: number }) {
       const id = await api.createNote(fields);
       pushOp(opCreate(id, fields));
       placed++;
+      made.push(id);
     } catch (err) {
       reportError(`上传「${f.name}」`, err);
     }
   }
   await store.refreshBoard();
   if (placed) ElMessage.success(`已把 ${placed} 份资料放上白板`);
+  return made;
 }
 
 /** 挂到节点下：自动建子卡片 + 连线，摆到它右边一层 */
@@ -4088,6 +4126,19 @@ function prio(t: Task) {
       </div>
       <template #footer>
         <el-button @click="docCollectOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 端口菜单里选「图片 / 资料」：先选文件，再自动建节点并连上 -->
+    <el-dialog v-model="portFileOpen" title="选择图片或资料" width="440px" append-to-body>
+      <label class="up-zone">
+        <input class="up-input" type="file" multiple @change="onPortFilePicked" />
+        <div class="up-ico">🖼</div>
+        <div class="up-main">点击这里选择文件</div>
+        <div class="up-sub">图片 / PDF / 文档都行 —— 选完自动建成节点，并连到刚才那个节点上</div>
+      </label>
+      <template #footer>
+        <el-button @click="portFileOpen = false">取消</el-button>
       </template>
     </el-dialog>
 

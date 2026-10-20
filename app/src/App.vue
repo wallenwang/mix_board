@@ -24,7 +24,7 @@ import { runSelfTest, reportError } from "./diag";
 
 /**
  * 布局约定（2026-10-16 自适应版）：
- * 顶部 = 项目名 ｜ 看板/白板/写作（**可多选的分段控件**）｜ 浮动页面 ｜ 导出。
+ * 顶部 = 项目名 ｜ 看板/白板/写作（**可多选的分段控件**）｜ 浮动网页 ｜ 导出。
  *
  * - 三个开关不是单选：勾 1 个 = 全屏；勾 2 个 = 左右分屏；勾 3 个 = 三栏。
  * - ⚠️ 分栏宽度用 **flex-grow 比例**分配，不能用百分比 —— 分隔条是额外占位的固定宽度，
@@ -652,7 +652,7 @@ watch(
             <rect x="3" y="4" width="18" height="16" rx="2.5" />
             <path d="M8 4v16" />
           </svg>
-          <span class="float-toggle-text">浮动页面</span>
+          <span class="float-toggle-text">浮动网页</span>
         </button>
 
         <div class="header-spacer"></div>

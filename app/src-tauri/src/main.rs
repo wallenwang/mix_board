@@ -128,6 +128,25 @@ fn main() {
                 };
             }
 
+            // 自检用：KANBAN_DEBUG_FLOAT=1 时启动就开一个浮动网页，把结果写进 diag.log。
+            // 平时不设这个变量，什么都不做（留着是为了以后排查"网页打不开"类问题）。
+            if std::env::var("KANBAN_DEBUG_FLOAT").ok().as_deref() == Some("1") {
+                let handle = app.handle().clone();
+                let logp = app.state::<diag::LogPath>().0.clone();
+                tauri::async_runtime::spawn(async move {
+                    let r = commands::float_web_open(
+                        handle,
+                        "https://cn.bing.com/".into(),
+                        40.0,
+                        120.0,
+                        520.0,
+                        360.0,
+                    )
+                    .await;
+                    diag::append(&logp, &format!("FLOATWEB selftest -> {:?}", r));
+                });
+            }
+
             // ---- 窗口尺寸自适应 ----
             // 之前尺寸写死在 tauri.conf.json（1440×900 / 最小 1024×640）：
             // 小屏（1366×768）或 Windows 贴靠半屏时窗口比屏幕还大，
@@ -244,6 +263,9 @@ fn main() {
             commands::list_docs, commands::create_doc, commands::update_doc, commands::delete_doc,
             commands::get_data_dir, commands::open_data_dir,
             commands::show_main_window, commands::perf_probe,
+            commands::float_web_open, commands::float_web_bounds,
+            commands::float_web_navigate, commands::float_web_visible,
+            commands::float_web_close, commands::float_web_set_zoom,
             commands::data_overview, commands::pick_folder, commands::change_data_dir,
             commands::open_project_dir, commands::open_project_db,
             diag::diag_log, diag::diag_db,

@@ -233,6 +233,16 @@ const real = {
   /** 启动性能探针：写进 <数据目录>/perf.log（排查卡顿用，不影响功能） */
   perfProbe: (line: string) =>
     hasTauri ? invoke<void>("perf_probe", { line }) : Promise.resolve(),
+
+  // 浮动网页：用**子 webview**（真内核），不是 iframe
+  floatWebOpen: (url: string, x: number, y: number, w: number, h: number) =>
+    invoke<void>("float_web_open", { url, x, y, w, h }),
+  floatWebBounds: (x: number, y: number, w: number, h: number) =>
+    invoke<void>("float_web_bounds", { x, y, w, h }),
+  floatWebNavigate: (url: string) => invoke<void>("float_web_navigate", { url }),
+  floatWebVisible: (on: boolean) => invoke<void>("float_web_visible", { on }),
+  floatWebClose: () => invoke<void>("float_web_close"),
+  floatWebZoom: (zoom: number) => invoke<void>("float_web_set_zoom", { zoom }),
 };
 
 // In the desktop app, use real Tauri commands; in a plain browser, use the mock.
