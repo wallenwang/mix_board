@@ -73,33 +73,65 @@ onMounted(() => {
     /* 忽略损坏的本地数据 */
   }
   window.addEventListener("resize", onResize);
-  ro = new ResizeObserver(() => scheduleSync());
-  if (boxRef.value) ro.observe(boxRef.value);
   // 首帧布局稳定后再把网页视图摆上去
   void nextTick(() => {
     if (props.active && frameSrc.value) void showNative(frameSrc.value, true);
     else void syncBounds();
+    startFollow();
   });
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", onResize);
-  ro?.disconnect();
-  window.clearTimeout(boundsTimer);
+  stopFollow();
   // 不在这里关原生视图：浮动窗收起后还要能原样回来（关闭在 FloatWindow 里做）
 });
 
-let ro: ResizeObserver | null = null;
-let boundsTimer = 0;
-
 function onResize() {
-  scheduleSync();
+  void syncBounds();
 }
 
-/** 拖动/缩放时每帧都在变，节流到 80ms，别把 IPC 打爆 */
-function scheduleSync() {
-  window.clearTimeout(boundsTimer);
-  boundsTimer = window.setTimeout(() => void syncBounds(), 80);
+/**
+ * 跟随浮动窗移动/缩放。
+ *
+ * ⚠️ 不能用 ResizeObserver：**拖动只改位置、不改尺寸**，尺寸观察器一次都不会触发，
+ *    表现就是"窗口被拖走了，里面的网页还留在原地"（用户实测踩到过）。
+ * 这里改成按帧比对 getBoundingClientRect，位置或尺寸只要变了就推一次。
+ * 收起浮窗时立刻停表，不做无谓计算。
+ */
+let rafId = 0;
+let lastRect = { x: -1, y: -1, w: -1, h: -1 };
+let lastPush = 0;
+
+function startFollow() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(followTick);
+}
+
+function stopFollow() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = 0;
+}
+
+function followTick() {
+  rafId = requestAnimationFrame(followTick);
+  if (!props.active || !nativeOk.value || !nativeCreated) return;
+  const r = rectOf();
+  if (!r) return;
+  const moved =
+    Math.abs(r.x - lastRect.x) > 0 ||
+    Math.abs(r.y - lastRect.y) > 0 ||
+    Math.abs(r.w - lastRect.w) > 0 ||
+    Math.abs(r.h - lastRect.h) > 0;
+  if (!moved) return;
+  // 拖动时每帧都发 IPC 有点浪费，~30fps 足够跟手
+  const now = performance.now();
+  if (now - lastPush < 30) return;
+  lastPush = now;
+  lastRect = r;
+  void api.floatWebBounds(r.x, r.y, r.w, r.h).catch(() => {
+    /* 窗口正在销毁时的报错忽略 */
+  });
 }
 
 function rectOf(): { x: number; y: number; w: number; h: number } | null {
@@ -119,6 +151,7 @@ async function syncBounds() {
   if (!nativeOk.value || !nativeCreated) return;
   const r = rectOf();
   if (!r) return;
+  lastRect = r;
   try {
     await api.floatWebBounds(r.x, r.y, r.w, r.h);
   } catch (e) {
@@ -134,6 +167,7 @@ async function showNative(u: string, keepScroll = false) {
     if (!nativeCreated) {
       await api.floatWebOpen(u, r.x, r.y, r.w, r.h);
       nativeCreated = true;
+      lastRect = r;
     } else {
       await api.floatWebBounds(r.x, r.y, r.w, r.h);
       if (!keepScroll) await api.floatWebNavigate(u);
@@ -229,15 +263,18 @@ function applyZoom() {
 watch(
   () => props.active,
   (on) => {
-    if (!nativeOk.value || !nativeCreated) return;
-    void (async () => {
-      if (on) {
+    if (on) {
+      startFollow();
+      if (!nativeOk.value || !nativeCreated) return;
+      void (async () => {
         await syncBounds();
         void api.floatWebVisible(true);
-      } else {
-        void api.floatWebVisible(false);
-      }
-    })();
+      })();
+    } else {
+      stopFollow();
+      if (!nativeOk.value || !nativeCreated) return;
+      void api.floatWebVisible(false);
+    }
   }
 );
 
