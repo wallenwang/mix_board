@@ -1184,3 +1184,59 @@ html.dark .view-switch .pane-toggle.on {
     max-width: 34vw !important;
   }
 }
+
+/* ------------------------------------------------------------------
+   文档栏：整栏只显示「一个底色」
+
+   背景：正文底色（.write 上的 --doc-bg）换掉以后，编辑器内部还叠着好几层
+   自己的底色 —— .vditor 是米色（--panel-background），Vditor 工具条是白色。
+   结果就是"上面一块白、中间一块米、底下一块绿"。
+
+   这里用**更高的特异性**（.md-editor .vditor .xxx）压过 MdEditor.vue 里
+   `!important` 的白底规则，把它们全部让开；工具条本身保留，只去掉底色。
+   （放在全局样式里，是因为 scoped + :deep() 对这种 JS 动态生成的节点不可靠。）
+   ------------------------------------------------------------------ */
+.md-editor .vditor,
+.md-editor .vditor .vditor-reset,
+.md-editor .vditor .vditor-sv,
+.md-editor .vditor .vditor-preview,
+.md-editor .vditor .vditor-toolbar {
+  background-color: transparent !important;
+}
+.md-editor .vditor .vditor-toolbar {
+  border-bottom-color: rgba(127, 127, 127, 0.18) !important;
+}
+/* 代码块/行内代码给一点极淡墨色，任意底色上都还看得出"这是代码" */
+.md-editor .vditor .vditor-reset pre > code,
+.md-editor .vditor .vditor-reset code {
+  background-color: rgba(127, 127, 127, 0.14) !important;
+}
+
+/* 文档栏顶部那排按钮 + "所见即所得/源码"切换：融入底色，别在绿底上冒白块 */
+.write .ed-head .el-button,
+.write .ed-tools .el-button {
+  background-color: rgba(127, 127, 127, 0.1) !important;
+  border-color: rgba(127, 127, 127, 0.22) !important;
+  color: var(--doc-ink, var(--text)) !important;
+}
+.write .ed-head .el-button:hover {
+  background-color: rgba(127, 127, 127, 0.18) !important;
+}
+.write .ed-head .el-radio-button__inner {
+  background-color: rgba(127, 127, 127, 0.08) !important;
+  border-color: rgba(127, 127, 127, 0.22) !important;
+  color: var(--doc-ink, var(--text)) !important;
+  box-shadow: none !important;
+}
+.write .ed-head .el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background-color: rgba(90, 103, 200, 0.92) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+}
+/* 主按钮（导出 Word）保持蓝色主色，作为唯一强调 */
+.write .ed-head .el-button--primary,
+.write .ed-tools .el-button--primary {
+  background-color: rgba(90, 103, 200, 0.92) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+}

@@ -1674,10 +1674,21 @@ export default { name: "WriteView" };
   border-color: rgba(127, 127, 127, 0.22);
   color: var(--doc-ink, var(--text));
 }
-/* Vditor 自己的白底也要让开，否则正文区会露出一块 */
-.write .ed-body :deep(.vditor),
-.write .ed-body :deep(.vditor-reset),
-.write .ed-body :deep(.vditor-wysiwyg pre.vditor-reset) {
-  background: transparent;
+/* ---- 单一底色：整栏只允许「一个颜色」 ----
+   Vditor 内部有自己的 --panel-background（米色 #ece9e3），
+   .editor / 工具条等又各有主题底，叠加起来就是"上面白、中间米、底色绿"。
+   这里统一用 !important 让它们全部透明，只留外层 .write 那一个底色。
+   例外：Vditor 的浮层（下拉提示 / 大纲 / 面板）保留自己的白底，否则看不清。 */
+.write .editor,
+.write .doc-list,
+.write .ed-head,
+.write .ed-tools,
+.write .ed-body,
+.write .ed-ta,
+.write .ed-prev {
+  background-color: transparent !important;
 }
+/* Vditor 内部各层（.vditor 米色底、它自己的白工具条、.vditor-reset）的底色
+   统一在 src/styles.css 里用更高特异性压掉 —— 那一层是 JS 动态生成的节点，
+   scoped + :deep() 压不住（实测无效），必须写全局。 */
 </style>
