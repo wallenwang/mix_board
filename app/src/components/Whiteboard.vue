@@ -19,6 +19,9 @@ import {
   BOX_COLORS,
   inkOn,
   inkShadowOn,
+  clipToRect as clipToRectShared,
+  edgeGeom,
+  edgePath as edgePathShared,
 } from "../wb";
 import { parseOutline, flattenOutline, outlineToText } from "../outline";
 import {
@@ -36,7 +39,10 @@ import {
   downloadBlob,
   safeFileName,
   loadImage,
+  readNodeStyle,
+  ensureFontsReady,
   type ExportNode,
+  type ExportLine,
 } from "../exportImage";
 import { reportError } from "../diag";
 
@@ -1419,7 +1425,8 @@ const visibleEdgeGeom = computed(() =>
     const b = centerOf(tk, e.to_id);
     const p1 = clipToRect(a, b, sizeAt(fk, e.from_id));
     const p2 = clipToRect(b, a, sizeAt(tk, e.to_id));
-    return { e, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, d: edgePath(a, b, p1, p2) };
+    const g = edgeGeom(a, b, p1, p2, edgeStyle.value);
+    return { e, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, d: g.d, angle: g.angle };
   })
 );
 
@@ -1445,39 +1452,18 @@ function edgePath(
   p1: { x: number; y: number },
   p2: { x: number; y: number }
 ) {
-  if (edgeStyle.value === "line") return `M${p1.x},${p1.y} L${p2.x},${p2.y}`;
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  let c1x: number, c1y: number, c2x: number, c2y: number;
-  if (Math.abs(dx) < 24 && Math.abs(dy) > 24) {
-    // 几乎垂直：竖向 S
-    const k = Math.max(34, Math.min(130, Math.abs(dy) * 0.5));
-    const s = dy >= 0 ? 1 : -1;
-    c1x = p1.x;
-    c1y = p1.y + s * k;
-    c2x = p2.x;
-    c2y = p2.y - s * k;
-  } else {
-    // 常规：横向 S（臂长跟水平距离走，避免短连线绕成圈）
-    const k = Math.max(36, Math.min(140, Math.abs(dx) * 0.6));
-    const s = dx >= 0 ? 1 : -1;
-    c1x = p1.x + s * k;
-    c1y = p1.y;
-    c2x = p2.x - s * k;
-    c2y = p2.y;
-  }
-  return `M${p1.x},${p1.y} C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`;
+  // 几何只有一份真源：wb.ts 的 edgeGeom —— 导出 canvas 调的也是它，
+  // 否则「屏幕是弧线、导出来是直线」这种失真永远修不完。
+  return edgePathShared(a, b, p1, p2, edgeStyle.value);
 }
 
 /** 拖拽中那条临时线也跟随当前样式 */
 const linkingPathD = computed(() => {
   const l = linking.value;
   if (!l) return "";
-  if (edgeStyle.value === "line") return `M${l.ax},${l.ay} L${l.x},${l.y}`;
-  const dx = l.x - l.ax;
-  const k = Math.max(36, Math.min(140, Math.abs(dx) * 0.6));
-  const sgn = dx >= 0 ? 1 : -1;
-  return `M${l.ax},${l.ay} C${l.ax + sgn * k},${l.ay} ${l.x - sgn * k},${l.y} ${l.x},${l.y}`;
+  const p = { x: l.ax, y: l.ay };
+  const q = { x: l.x, y: l.y };
+  return edgePathShared(p, q, p, q, edgeStyle.value);
 });
 
 const nodeExists = (kind: "task" | "note", id: number) =>
@@ -2505,33 +2491,78 @@ function jumpToRef(key: string) {
 /** 把当前白板（任务 + 各类节点 + 连线）翻译成画布要的"场景" */
 async function buildScene() {
   const nodes: ExportNode[] = [];
+  const elOf = (kind: "task" | "note", id: number) =>
+    canvasRef.value?.querySelector(
+      `[data-node-kind="${kind}"][data-node-id="${id}"]`
+    ) as HTMLElement | null;
+  /** 文字样式在子元素上，父元素只有背景/圆角/阴影 */
+  const TEXT_SEL: Record<string, string> = {
+    note: ".note-text",
+    mind: ".mind-text",
+    text: ".text-body",
+    doc: ".doc-head",
+    file: ".file-name",
+    gantt: "",
+    box: ".box-title",
+    task: ".tn-title",
+  };
+  const domStyle = (kind: "task" | "note", id: number, k: string) =>
+    readNodeStyle(elOf(kind, id), TEXT_SEL[k] ?? "");
+  /** 真实渲染尺寸：任务卡高度是内容撑开的，写死常量会和屏幕对不上 */
+  const domSize = (kind: "task" | "note", id: number, dw: number, dh: number) => {
+    const el = elOf(kind, id);
+    return { w: el?.offsetWidth || dw, h: el?.offsetHeight || dh };
+  };
+
   for (const t of store.allTasks) {
     const p = posOf("task", t.id);
+    const size = domSize("task", t.id, TASK_W, TASK_H);
+    const pr = prio(t);
+    // 屏幕上 .tn-sub 那一行：列名 · 优先级 · 截止 · 子节点数
+    const sub: string[] = [];
+    const cn = colName(t);
+    if (cn) sub.push(cn);
+    if (t.priority !== 2) sub.push(pr.label);
+    if (t.due_date) sub.push("📅");
+    const kids = store.taskChildCount(t.id);
+    if (kids) sub.push(`▸ ${kids}`);
     nodes.push({
       kind: "task",
       x: p.x,
       y: p.y,
-      w: TASK_W,
-      h: TASK_H,
+      w: size.w,
+      h: size.h,
       title: t.title,
       body: t.description,
-      accent: prio(t).color,
+      accent: pr.color,
+      done: !!t.completed_at,
+      sub,
+      subColor: pr.color,
+      style: domStyle("task", t.id, "task"),
     });
   }
   const imgJobs: Promise<void>[] = [];
   for (const n of store.notes) {
     const p = posOf("note", n.id);
-    const s = noteSize(n);
+    const natural = noteSize(n);
+    const size = domSize("note", n.id, natural.w, natural.h);
     const k = kindOf(n);
     const node: ExportNode = {
       kind: k,
       x: p.x,
       y: p.y,
-      w: s.w,
-      h: s.h,
+      w: size.w,
+      h: size.h,
       title: k === "file" ? labelOf(n) : n.text,
       color: n.color,
+      style: domStyle("note", n.id, k),
     };
+    if (k === "mind") node.shape = lookOf(n).shape === "circle" ? "circle" : "capsule";
+    if (k === "doc") {
+      const d = docCardOf(n);
+      node.title = d?.title || n.text || "（文档已删除）";
+      node.summary = d?.summary || "";
+    }
     if (k === "file") {
       node.body = sizeTextOf(n);
       const url = previewOf(n);
@@ -2546,12 +2577,28 @@ async function buildScene() {
     nodes.push(node);
   }
   await Promise.all(imgJobs);
-  const lines = visibleEdges.value.map((e) => {
-    const a = centerOf(e.from_kind, e.from_id);
-    const b = centerOf(e.to_kind, e.to_id);
-    return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
-  });
-  return { nodes, lines, title: store.currentProject?.name ?? "白板" };
+  // 中文字体没就绪就画，换行位置会和屏幕对不上
+  await ensureFontsReady();
+
+  // 连线几何直接用屏幕上那一份：同一条 SVG path（曲线/直线）+ 同一套箭头方向
+  const host = canvasRef.value ?? document.documentElement;
+  const cs = getComputedStyle(host);
+  const edgeColor = cs.getPropertyValue("--text-faint").trim() || "#a8b3bd";
+  const lines: ExportLine[] = visibleEdgeGeom.value.map((g) => ({
+    d: g.d,
+    x1: g.x1,
+    y1: g.y1,
+    x2: g.x2,
+    y2: g.y2,
+    angle: g.angle,
+    color: edgeColor,
+    width: 1.7,
+  }));
+
+  const bg =
+    cs.backgroundColor && cs.backgroundColor !== "rgba(0, 0, 0, 0)" ? cs.backgroundColor : "#ffffff";
+
+  return { nodes, lines, bg, title: store.currentProject?.name ?? "白板" };
 }
 
 async function exportBoardImage(kind: "png" | "pdf") {

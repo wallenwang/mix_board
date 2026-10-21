@@ -193,3 +193,86 @@ export function layoutTree(
   }
   return pos;
 }
+
+/* ------------------------------------------------------------------
+ * 连线几何：屏幕（SVG）和导出（Canvas）共用这一份，别再各画各的。
+ *
+ * 之前导出把连线写成 moveTo/lineTo 直线，屏幕上却是贝塞尔弧线 ——
+ * 于是"白板设的是曲线、导出来变直线"。几何只能有一处真源。
+ * ------------------------------------------------------------------ */
+
+export type EdgeStyle = "curve" | "line";
+
+export interface Pt {
+  x: number;
+  y: number;
+}
+
+/** 从矩形中心朝目标方向，把点推到矩形边框上 —— 连线贴边走，不会画进卡片里面 */
+export function clipToRect(c: Pt, toward: Pt, s: { w: number; h: number }): Pt {
+  const dx = toward.x - c.x;
+  const dy = toward.y - c.y;
+  if (!dx && !dy) return { x: c.x, y: c.y };
+  const hw = Math.max(1, s.w / 2);
+  const hh = Math.max(1, s.h / 2);
+  const k = Math.min(hw / (Math.abs(dx) || 1e-6), hh / (Math.abs(dy) || 1e-6));
+  return { x: c.x + dx * k, y: c.y + dy * k };
+}
+
+/**
+ * 连线路径 + 末端切线角。
+ *
+ * 直线：两个边界点直接连。
+ *
+ * 弧线：用**固定水平控制臂**的三次贝塞尔 —— 也就是思维导图那种 S 形：
+ * 线先从卡片边缘水平走出去，中途拐弯，再水平进入目标卡片。
+ * ⚠️ 不要用"沿出边法线外推"的写法：当两个卡片垂直堆叠时，法线方向和连线方向
+ * 几乎重合，控制点共线，曲线就退化成直线了（手绘感全没了）。
+ * 只有近乎垂直对齐（|dx| < 24）时才改用垂直臂，否则会绕出一个很怪的圈。
+ *
+ * 返回的 angle 是箭头方向（弧度）：直线取 p1→p2，曲线取终点控制点→终点
+ * （即贝塞尔在 t=1 处的切线），所以箭头会顺着弧线"进"卡片，不会歪。
+ */
+export function edgeGeom(
+  a: Pt,
+  b: Pt,
+  p1: Pt,
+  p2: Pt,
+  style: EdgeStyle = "curve"
+): { d: string; angle: number } {
+  if (style === "line") {
+    return {
+      d: `M${p1.x},${p1.y} L${p2.x},${p2.y}`,
+      angle: Math.atan2(p2.y - p1.y, p2.x - p1.x),
+    };
+  }
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  let c1x: number, c1y: number, c2x: number, c2y: number;
+  if (Math.abs(dx) < 24 && Math.abs(dy) > 24) {
+    // 几乎垂直：竖向 S
+    const k = Math.max(34, Math.min(130, Math.abs(dy) * 0.5));
+    const s = dy >= 0 ? 1 : -1;
+    c1x = p1.x;
+    c1y = p1.y + s * k;
+    c2x = p2.x;
+    c2y = p2.y - s * k;
+  } else {
+    // 常规：横向 S（臂长跟水平距离走，避免短连线绕成圈）
+    const k = Math.max(36, Math.min(140, Math.abs(dx) * 0.6));
+    const s = dx >= 0 ? 1 : -1;
+    c1x = p1.x + s * k;
+    c1y = p1.y;
+    c2x = p2.x - s * k;
+    c2y = p2.y;
+  }
+  return {
+    d: `M${p1.x},${p1.y} C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`,
+    angle: Math.atan2(p2.y - c2y, p2.x - c2x),
+  };
+}
+
+/** 只要 path 字符串时用这个（屏幕侧 linkingPathD 之类） */
+export function edgePath(a: Pt, b: Pt, p1: Pt, p2: Pt, style: EdgeStyle = "curve"): string {
+  return edgeGeom(a, b, p1, p2, style).d;
+}

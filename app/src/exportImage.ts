@@ -11,8 +11,28 @@
 
 import { inkOn } from "./wb";
 
+/** 节点在屏幕上的真实样式（用 getComputedStyle 读，不靠手抄 CSS） */
+export interface NodeStyle {
+  bg: string;
+  border: string;
+  borderW: number;
+  radius: number;
+  /** 原始 box-shadow 文本，可能有多层 */
+  shadow: string;
+  color: string;
+  font: string;
+  fontSize: number;
+  lineHeight: number;
+  weight: number | string;
+  align: "left" | "center";
+  padT: number;
+  padR: number;
+  padB: number;
+  padL: number;
+}
+
 export interface ExportNode {
-  kind: "note" | "text" | "mind" | "file" | "box" | "task";
+  kind: "note" | "text" | "mind" | "file" | "box" | "task" | "doc" | "gantt";
   x: number;
   y: number;
   w: number;
@@ -25,23 +45,222 @@ export interface ExportNode {
   accent?: string;
   /** 图片节点的缩略图（已加载完成的 Image） */
   image?: CanvasImageSource | null;
+  /** 图片裁切（归一化 0~1） */
+  crop?: { x: number; y: number; w: number; h: number } | null;
+  /** 屏幕上的真实样式 */
+  style?: NodeStyle;
+  /** 导图节点形状 */
+  shape?: "capsule" | "circle";
+  /** 任务是否已完成 */
+  done?: boolean;
+  /** 任务卡第二行：列名 / 优先级 / 截止 / 子节点数（屏幕上 .tn-sub 那行） */
+  sub?: string[];
+  subColor?: string;
+  /** 文档卡片摘要 */
+  summary?: string;
 }
 
 export interface ExportLine {
+  /** 屏幕用的那条 SVG path，canvas 直接 Path2D 复用它 → 曲线/直线零走样 */
+  d: string;
   x1: number;
   y1: number;
   x2: number;
   y2: number;
+  /** 箭头方向（弧度），由 wb.ts 的 edgeGeom 给出 */
+  angle: number;
+  color: string;
+  width: number;
 }
 
 export interface ExportScene {
   nodes: ExportNode[];
   lines: ExportLine[];
   title?: string;
+  /** 画布底色（默认取 --bg） */
+  bg?: string;
 }
 
 const FONT = '"Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif';
 const MONO = 'Consolas, "Courier New", monospace';
+
+/** 读一个数字 CSS 值，失败给默认值 */
+function num(v: string, dft: number): number {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : dft;
+}
+
+/**
+ * 把屏幕上的节点样式读下来。
+ *
+ * 为什么要读 DOM 而不是写常量：白板的便签圆角、导图胶囊/圆形、字色（inkOn）、
+ * 阴影、字体全都是 CSS 在管，手抄一份到 canvas 里必然越改越不一致 ——
+ * 之前导出"看着不一样"有一半是这么来的。
+ *
+ * ⚠️ 文字样式在**子元素**上（.note-text / .mind-text / .tn-title ...），
+ * 父元素拿到的是继承值（font-weight 400、font-size 16），照父元素画就会丢加粗、
+ * 字号也不对。所以传 textSel 优先读子元素，背景/圆角/阴影仍读父元素。
+ */
+export function readNodeStyle(
+  el: Element | null,
+  textSel = "",
+  fallbackColor = "#1f2328"
+): NodeStyle {
+  if (!el) {
+    return {
+      bg: "", border: "", borderW: 0, radius: 8, shadow: "", color: fallbackColor,
+      font: FONT, fontSize: 14, lineHeight: 22, weight: 400, align: "left",
+      padT: 10, padR: 10, padB: 10, padL: 10,
+    };
+  }
+  const box = el as HTMLElement;
+  const cs = getComputedStyle(box);
+  const inner = textSel ? (box.querySelector(textSel) as HTMLElement | null) : null;
+  const tcs = inner ? getComputedStyle(inner) : cs;
+  const fw = tcs.fontWeight;
+  const fs = num(tcs.fontSize, 14);
+  return {
+    bg: cs.backgroundColor === "rgba(0, 0, 0, 0)" ? "" : cs.backgroundColor,
+    border: cs.borderTopColor,
+    borderW: num(cs.borderTopWidth, 0),
+    radius: num(cs.borderTopLeftRadius, 0),
+    shadow: cs.boxShadow === "none" ? "" : cs.boxShadow,
+    color: tcs.color || fallbackColor,
+    font: tcs.fontFamily || FONT,
+    fontSize: fs,
+    lineHeight:
+      tcs.lineHeight === "normal" ? fs * 1.5 : num(tcs.lineHeight, fs * 1.5),
+    weight: fw === "normal" ? 400 : fw === "bold" ? 700 : num(fw, 400),
+    align: tcs.textAlign === "center" ? "center" : "left",
+    padT: num(cs.paddingTop, 0),
+    padR: num(cs.paddingRight, 0),
+    padB: num(cs.paddingBottom, 0),
+    padL: num(cs.paddingLeft, 0),
+  };
+}
+
+/** box-shadow 文本 → 可用的层（canvas 一次只能一个阴影，多层就分层模拟） */
+interface ShadowLayer {
+  x: number;
+  y: number;
+  blur: number;
+  spread: number;
+  color: string;
+}
+
+function parseShadows(css: string): ShadowLayer[] {
+  if (!css) return [];
+  const out: ShadowLayer[] = [];
+  // 按逗号切，但 rgb()/rgba() 里的逗号不能切
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of css) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      parts.push(cur.trim());
+      cur = "";
+    } else cur += ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+
+  for (const p of parts) {
+    // inset（内阴影）canvas 无法复刻，跳过；硬画会变成外面一圈脏影
+    if (/inset/.test(p)) continue;
+    const colorM =
+      p.match(/rgba?\([^)]*\)/) || p.match(/#[0-9a-fA-F]{3,8}/) || p.match(/\b(?:currentColor|transparent)\b/);
+    const nums = (p.replace(colorM ? colorM[0] : "", "").match(/-?\d*\.?\d+px/g) || []).map((s) =>
+      parseFloat(s)
+    );
+    if (nums.length < 2) continue;
+    out.push({
+      x: nums[0] ?? 0,
+      y: nums[1] ?? 0,
+      blur: Math.max(0, nums[2] ?? 0),
+      spread: nums[3] ?? 0,
+      color: colorM ? colorM[0] : "rgba(0,0,0,.12)",
+    });
+  }
+  return out;
+}
+
+/**
+ * 用 canvas 复刻 box-shadow。
+ *
+ * canvas 一次只能挂一个阴影，所以取"最主要的一层"（有偏移的柔和阴影）挂到 ctx 上，
+ * 由调用方在 fill 时自然生影；0 偏移的细环（--shadow-ring 那种）单独返回，
+ * 填充完再描一圈 —— 用 destination-out 去"擦"会把底下已画的内容一起擦掉，绝不能那么干。
+ */
+function applyShadow(ctx: CanvasRenderingContext2D, layers: ShadowLayer[]): ShadowLayer | null {
+  if (!layers.length) return null;
+  const ring = layers.find((l) => Math.abs(l.x) < 0.5 && Math.abs(l.y) < 0.5) ?? null;
+  const soft =
+    layers.find((l) => (Math.abs(l.x) > 0.5 || Math.abs(l.y) > 0.5) && l.blur > 0) ?? null;
+  if (soft) {
+    ctx.shadowColor = soft.color;
+    ctx.shadowBlur = soft.blur;
+    ctx.shadowOffsetX = soft.x;
+    ctx.shadowOffsetY = soft.y;
+  }
+  return ring;
+}
+
+function clearShadow(ctx: CanvasRenderingContext2D) {
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+}
+
+function paintRing(
+  ctx: CanvasRenderingContext2D,
+  ring: ShadowLayer | null,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  if (!ring) return;
+  ctx.save();
+  ctx.strokeStyle = ring.color;
+  ctx.lineWidth = Math.max(1, (ring.spread + ring.blur) * 2);
+  roundRect(ctx, x, y, w, h, r);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** 箭头：与屏幕 SVG marker 同尺寸（10×10 的三角） */
+function drawArrow(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  color: string,
+  size = 11
+) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-size, size * 0.46);
+  ctx.lineTo(-size, -size * 0.46);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+}
+
+/** 等字体就绪：不等的话中文回退字体，换行位置和屏幕对不上 */
+export async function ensureFontsReady(): Promise<void> {
+  try {
+    await (document as Document & { fonts?: FontFaceSet }).fonts?.ready;
+  } catch {
+    /* 忽略：老环境没有 FontFaceSet */
+  }
+}
 
 /** 按可用宽度折行（中文逐字断，英文尽量断在空格） */
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -98,131 +317,143 @@ function roundRect(
 
 function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
   const { x, y, w, h } = n;
+  const st = n.style;
   ctx.save();
 
+  /* ---------- 分组框：虚线 + 淡色填充 + 标题底色条 ---------- */
   if (n.kind === "box") {
     const c = n.color || "#409EFF";
-    ctx.globalAlpha = 0.06;
-    ctx.fillStyle = c;
-    roundRect(ctx, x, y, w, h, 12);
+    const r = st?.radius ?? 16;
+    // 屏幕上是 .box-node：background: color-mix(text 3%)、border: 1px dashed、radius-lg
+    ctx.fillStyle = st?.bg || "rgba(31,35,40,0.03)";
+    roundRect(ctx, x, y, w, h, r);
     ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.setLineDash([8, 5]);
-    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = st?.borderW || 1;
     ctx.strokeStyle = c;
-    roundRect(ctx, x, y, w, h, 12);
+    roundRect(ctx, x, y, w, h, r);
     ctx.stroke();
     ctx.setLineDash([]);
-    // 标题画在 6% 淡色底（≈白纸）上，固定用深墨，不用跟着框色走
-    ctx.fillStyle = "#1f2328";
-    ctx.font = `600 15px ${FONT}`;
-    ctx.textBaseline = "top";
-    ctx.fillText(n.title || "分组", x + 12, y + 10);
-    ctx.restore();
-    return;
-  }
 
-  if (n.kind === "text") {
-    ctx.fillStyle = "#1f2328";
-    ctx.font = `15px ${FONT}`;
-    ctx.textBaseline = "top";
-    const lines = wrapText(ctx, n.title, w);
-    lines.forEach((l, i) => ctx.fillText(l, x, y + i * 22));
-    ctx.restore();
-    return;
-  }
-
-  if (n.kind === "mind") {
-    const c = n.color || "#409EFF";
+    // .box-title：top:-12px、left:12px，底色跟框色，字色由 inkOn 决定
+    const fs = st?.fontSize || 14;
+    const font = st?.font || FONT;
+    ctx.font = `600 ${fs}px ${font}`;
+    const label = n.title || "分组";
+    const tw = Math.min(Math.max(60, w - 24), ctx.measureText(label).width + 24);
+    const barH = fs + 12;
     ctx.fillStyle = c;
-    roundRect(ctx, x, y, w, h, 9);
+    roundRect(ctx, x + 12, y - 12, tw, barH, 8);
     ctx.fill();
-    // 浅色节点配深字，深色节点配白字
     ctx.fillStyle = inkOn(c);
-    ctx.font = `600 14px ${FONT}`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    const lines = wrapText(ctx, n.title || "主题", w - 20);
-    const lh = 19;
-    const top = y + Math.max(6, (h - lines.length * lh) / 2);
-    lines.forEach((l, i) => ctx.fillText(l, x + w / 2, top + i * lh));
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(label, x + 24, y - 12 + barH / 2);
     ctx.restore();
     return;
   }
 
-  if (n.kind === "file") {
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = "#d0d7de";
-    ctx.lineWidth = 1;
-    roundRect(ctx, x, y, w, h, 8);
+  /* ---------- 其余节点：先按屏幕真实样式铺底 ---------- */
+  const isCircle = n.kind === "mind" && n.shape === "circle";
+  const radius = isCircle ? Math.min(w, h) / 2 : st?.radius ?? 8;
+  // 没底色的节点（列头文字、纯文本）不要硬刷白：那会在画布上多出一块白板
+  const bg = st?.bg || n.color || "";
+
+  const layers = parseShadows(st?.shadow || "");
+  const ring = applyShadow(ctx, layers);
+  if (bg) {
+    ctx.fillStyle = bg;
+    roundRect(ctx, x, y, w, h, radius);
     ctx.fill();
+  }
+  clearShadow(ctx);
+  paintRing(ctx, ring, x, y, w, h, radius);
+
+  if (st && st.borderW > 0 && st.border) {
+    ctx.strokeStyle = st.border;
+    ctx.lineWidth = st.borderW;
+    roundRect(ctx, x, y, w, h, radius);
     ctx.stroke();
-    let ty = y + 10;
+  }
+
+  const padL = st?.padL ?? 12;
+  const padR = st?.padR ?? 12;
+  const padT = st?.padT ?? 11;
+  const innerW = Math.max(8, w - padL - padR);
+  const font = st?.font || FONT;
+  const fs = st?.fontSize || 14;
+  const lh = st?.lineHeight || fs * 1.6;
+  const color = st?.color || "#1f2328";
+  // CSS 的行框比字形高，多出来的半行距要把文字整体往下推，否则比屏幕高 1~2px
+  const halfLead = Math.max(0, (lh - fs) / 2);
+
+  /* ---------- 资料卡：缩略图（cover + crop）+ 文件名 + 大小 ---------- */
+  if (n.kind === "file") {
+    let ty = y + 8;
+    const thumbH = Math.max(24, h - 44);
     if (n.image) {
-      const th = Math.max(24, h - 40);
       ctx.save();
-      roundRect(ctx, x + 1, y + 1, w - 2, th, 7);
+      roundRect(ctx, x + 1, y + 1, w - 2, thumbH, Math.max(0, radius - 1));
       ctx.clip();
       const iw = (n.image as HTMLImageElement).naturalWidth || 1;
       const ih = (n.image as HTMLImageElement).naturalHeight || 1;
-      const s = Math.max((w - 2) / iw, th / ih);
-      const dw = iw * s;
-      const dh = ih * s;
-      ctx.drawImage(n.image, x + 1 + (w - 2 - dw) / 2, y + 1 + (th - dh) / 2, dw, dh);
+      const c = n.crop;
+      const sx = c ? c.x * iw : 0;
+      const sy = c ? c.y * ih : 0;
+      const sw = c ? c.w * iw : iw;
+      const sh = c ? c.h * ih : ih;
+      const s = Math.max((w - 2) / sw, thumbH / sh);
+      const dw = sw * s;
+      const dh = sh * s;
+      ctx.drawImage(
+        n.image, sx, sy, sw, sh,
+        x + 1 + (w - 2 - dw) / 2, y + 1 + (thumbH - dh) / 2, dw, dh
+      );
       ctx.restore();
-      ty = y + th + 8;
+      ty = y + thumbH + 8;
     }
-    ctx.fillStyle = "#1f2328";
-    ctx.font = `13px ${FONT}`;
     ctx.textBaseline = "top";
-    const name = wrapText(ctx, n.title, w - 20).slice(0, n.image ? 1 : 3);
-    name.forEach((l, i) => ctx.fillText(l, x + 10, ty + i * 18));
-    ctx.fillStyle = "#8b949e";
-    ctx.font = `11px ${FONT}`;
+    ctx.textAlign = "left";
+    ctx.fillStyle = color;
+    ctx.font = `600 ${Math.max(11, fs - 1)}px ${font}`;
+    const nl = wrapText(ctx, n.title, w - 20).slice(0, n.image ? 1 : 3);
+    nl.forEach((l, i) => ctx.fillText(l, x + 10, ty + i * (fs + 4)));
+    ctx.save();
+    ctx.globalAlpha = 0.62;
+    ctx.font = `11px ${font}`;
     ctx.fillText(n.body || "", x + 10, y + h - 18);
     ctx.restore();
+    ctx.restore();
     return;
   }
 
-  if (n.kind === "task") {
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = "#d0d7de";
-    ctx.lineWidth = 1;
-    roundRect(ctx, x, y, w, h, 8);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = n.accent || "#409EFF";
-    ctx.save();
-    roundRect(ctx, x, y, w, h, 8);
-    ctx.clip();
-    ctx.fillRect(x, y, 5, h);
-    ctx.restore();
-    ctx.fillStyle = "#1f2328";
-    ctx.font = `600 14px ${FONT}`;
+  /* ---------- 文档卡：标题 + 摘要 ---------- */
+  if (n.kind === "doc") {
     ctx.textBaseline = "top";
-    const tl = wrapText(ctx, n.title, w - 24).slice(0, 3);
-    tl.forEach((l, i) => ctx.fillText(l, x + 13, y + 10 + i * 19));
-    if (n.body) {
-      ctx.fillStyle = "#6e7781";
-      ctx.font = `12px ${FONT}`;
-      const bl = wrapText(ctx, n.body, w - 24).slice(0, 2);
-      bl.forEach((l, i) => ctx.fillText(l, x + 13, y + 12 + tl.length * 19 + i * 16));
+    ctx.textAlign = "left";
+    ctx.fillStyle = color;
+    ctx.font = `600 ${Math.max(12, fs)}px ${font}`;
+    const tl = wrapText(ctx, n.title, innerW).slice(0, 2);
+    tl.forEach((l, i) => ctx.fillText(l, x + padL, y + padT + halfLead + i * lh));
+    if (n.summary) {
+      ctx.save();
+      ctx.globalAlpha = 0.66;
+      ctx.font = `${Math.max(11, fs - 2)}px ${font}`;
+      const sl = wrapText(ctx, n.summary, innerW).slice(0, 3);
+      const sy = y + padT + tl.length * lh + 6 + halfLead;
+      sl.forEach((l, i) => ctx.fillText(l, x + padL, sy + i * (fs + 5)));
+      ctx.restore();
     }
     ctx.restore();
     return;
   }
 
-  // 甘特图节点：画成"白框 + 几条彩色条"的示意（导出场景里没有任务明细）
+  /* ---------- 甘特卡：示意彩条（屏幕上那是真甘特组件，canvas 只画轮廓） ---------- */
   if (n.kind === "gantt") {
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = "#d0d7de";
-    ctx.lineWidth = 1;
-    roundRect(ctx, x, y, w, h, 8);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#1f2328";
-    ctx.font = `600 14px ${FONT}`;
     ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillStyle = color;
+    ctx.font = `600 ${Math.max(12, fs)}px ${font}`;
     ctx.fillText("甘特图", x + 12, y + 10);
     const colors = ["#f56c6c", "#e6a23c", "#d9c36a", "#909399", "#67c23a"];
     const trackX = x + 70;
@@ -239,18 +470,56 @@ function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
     return;
   }
 
-  // 便签
-  ctx.fillStyle = n.color || "#FFF9C4";
-  ctx.strokeStyle = "rgba(0,0,0,.10)";
-  ctx.lineWidth = 1;
-  roundRect(ctx, x, y, w, h, 8);
-  ctx.fill();
-  ctx.stroke();
-  ctx.fillStyle = inkOn(n.color || "#FFF9C4");
-  ctx.font = `14px ${FONT}`;
+  /* ---------- 任务卡：优先级竖条 + 标题 + 第二行 + 备注 + 完成态 ---------- */
+  if (n.kind === "task") {
+    // 屏幕上 task-node 是 border-left: 3px，不是自己画的色块，宽度要对上
+    ctx.save();
+    roundRect(ctx, x, y, w, h, radius);
+    ctx.clip();
+    ctx.fillStyle = n.accent || "#409EFF";
+    ctx.fillRect(x, y, 3, h);
+    ctx.restore();
+
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.save();
+    if (n.done) ctx.globalAlpha = 0.55;
+    ctx.fillStyle = color;
+    ctx.font = `600 ${Math.max(12, fs)}px ${font}`;
+    const tl = wrapText(ctx, n.title, innerW).slice(0, 3);
+    tl.forEach((l, i) => ctx.fillText(l, x + 13, y + padT + halfLead + i * lh));
+
+    let cursorY = y + padT + tl.length * lh + 3 + halfLead;
+    const sub = (n.sub || []).filter(Boolean);
+    if (sub.length) {
+      ctx.font = `${Math.max(10, fs - 2.5)}px ${font}`;
+      ctx.fillStyle = n.subColor || color;
+      ctx.globalAlpha = n.done ? 0.4 : 0.85;
+      ctx.fillText(sub.join("   "), x + 13, cursorY);
+      ctx.globalAlpha = n.done ? 0.4 : 1;
+      cursorY += Math.max(11, fs);
+    }
+    if (n.body) {
+      ctx.globalAlpha = n.done ? 0.4 : 0.7;
+      ctx.font = `${Math.max(11, fs - 2)}px ${font}`;
+      const bl = wrapText(ctx, n.body, innerW).slice(0, 2);
+      bl.forEach((l, i) => ctx.fillText(l, x + 13, cursorY + 3 + i * (fs + 4)));
+    }
+    ctx.restore();
+    ctx.restore();
+    return;
+  }
+
+  /* ---------- 便签 / 文本 / 导图：纯文字 ---------- */
+  ctx.fillStyle = color;
+  ctx.font = `${st?.weight || 400} ${fs}px ${font}`;
   ctx.textBaseline = "top";
-  const lines = wrapText(ctx, n.title, w - 22);
-  lines.forEach((l, i) => ctx.fillText(l, x + 11, y + 11 + i * 20));
+  const centered = n.kind === "mind" || st?.align === "center";
+  ctx.textAlign = centered ? "center" : "left";
+  const lines = wrapText(ctx, n.title, innerW);
+  const totalH = lines.length * lh;
+  const top = n.kind === "mind" ? y + Math.max(padT, (h - totalH) / 2) : y + padT;
+  lines.forEach((l, i) => ctx.fillText(l, centered ? x + w / 2 : x + padL, top + halfLead + i * lh));
   ctx.restore();
 }
 
@@ -286,19 +555,20 @@ export function renderScene(scene: ExportScene, scale = 2, pad = 60): HTMLCanvas
   if (!ctx) return canvas;
 
   ctx.scale(scale, scale);
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = scene.bg || "#ffffff";
   ctx.fillRect(0, 0, w, h);
   ctx.translate(-minX + pad, -minY + pad);
 
-  // 连线在最底层
-  ctx.strokeStyle = "#a8b3bd";
-  ctx.lineWidth = 1.5;
+  // 连线在最底层：直接复用屏幕那条 SVG path（曲线/直线都在里面了）
+  ctx.lineCap = "round";
   for (const l of scene.lines) {
-    ctx.beginPath();
-    ctx.moveTo(l.x1, l.y1);
-    ctx.lineTo(l.x2, l.y2);
-    ctx.stroke();
+    ctx.strokeStyle = l.color;
+    ctx.lineWidth = l.width;
+    ctx.stroke(new Path2D(l.d));
   }
+  // 箭头单独一轮画，避免被后画的连线盖住
+  for (const l of scene.lines) drawArrow(ctx, l.x2, l.y2, l.angle, l.color);
+
   // 分组框画在节点底下
   for (const n of nodes) if (n.kind === "box") drawNode(ctx, n);
   for (const n of nodes) if (n.kind !== "box") drawNode(ctx, n);
