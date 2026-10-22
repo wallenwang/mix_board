@@ -8,6 +8,8 @@ import type {
   TrashItem,
   BoardNote,
   BoardEdge,
+  EdgeKind,
+  TaskRef,
   Doc,
 } from "./types";
 
@@ -28,6 +30,7 @@ let gid = 1;
 let nid = 1;
 let eid = 1;
 let did = 1;
+let rid = 1;
 const projects: Project[] = [];
 const columns: Column[] = [];
 const tasks: Task[] = [];
@@ -35,6 +38,7 @@ const tags: Tag[] = [];
 const trash: TrashItem[] = [];
 const notes: BoardNote[] = [];
 const edges: BoardEdge[] = [];
+const taskRefs: TaskRef[] = [];
 const docs: Doc[] = [];
 const settings: Record<string, string> = { theme: "light" };
 
@@ -171,6 +175,11 @@ const apiImpl = {
       tags: t.tags ?? [],
       wx: t.wx ?? null,
       wy: t.wy ?? null,
+      // 项目内编号，删掉的号不回收 —— 与桌面版一致
+      seq:
+        tasks
+          .filter((x) => x.project_id === t.project_id)
+          .reduce((m, x) => Math.max(m, x.seq || 0), 0) + 1,
     };
     tasks.push(task);
     return task.id;
@@ -279,6 +288,8 @@ const apiImpl = {
       h: note.h ?? null,
       file_id: note.file_id ?? null,
       meta: note.meta ?? "",
+      role: note.role ?? "",
+      group_kind: note.group_kind ?? "",
     };
     notes.push(n);
     return n.id;
@@ -292,6 +303,9 @@ const apiImpl = {
     log("delete_note", id);
     const i = notes.findIndex((x) => x.id === id);
     if (i >= 0) notes.splice(i, 1);
+    for (let j = taskRefs.length - 1; j >= 0; j--) {
+      if (taskRefs[j].note_id === id) taskRefs.splice(j, 1);
+    }
     for (let j = edges.length - 1; j >= 0; j--) {
       const e = edges[j];
       if ((e.from_kind === "note" && e.from_id === id) || (e.to_kind === "note" && e.to_id === id))
@@ -429,9 +443,10 @@ const apiImpl = {
     fromKind: "task" | "note",
     fromId: number,
     toKind: "task" | "note",
-    toId: number
+    toId: number,
+    kind?: EdgeKind
   ) {
-    log("create_edge", { projectId, fromKind, fromId, toKind, toId });
+    log("create_edge", { projectId, fromKind, fromId, toKind, toId, kind });
     if (fromKind === toKind && fromId === toId) throw new Error("不能连接到自身");
     const dup = edges.find(
       (e) =>
@@ -442,6 +457,7 @@ const apiImpl = {
         e.to_id === toId
     );
     if (dup) return dup.id;
+    const k: EdgeKind = kind ?? "decompose";
     const e: BoardEdge = {
       id: eid++,
       project_id: projectId,
@@ -449,14 +465,65 @@ const apiImpl = {
       from_id: fromId,
       to_kind: toKind,
       to_id: toId,
+      kind: k,
+      strength: k === "evidence" ? 1 : 0,
     };
     edges.push(e);
     return e.id;
+  },
+  async updateEdge(id: number, patch: { kind?: EdgeKind; strength?: number }) {
+    log("update_edge", { id, ...patch });
+    const e = edges.find((x) => x.id === id);
+    if (!e) return;
+    if (patch.kind !== undefined) e.kind = patch.kind;
+    if (patch.strength !== undefined) e.strength = patch.strength;
   },
   async deleteEdge(id: number) {
     log("delete_edge", id);
     const i = edges.findIndex((x) => x.id === id);
     if (i >= 0) edges.splice(i, 1);
+  },
+
+  // ---- 任务用到的资料与等级 ----
+  async listTaskRefs(projectId: number) {
+    log("list_task_refs", projectId);
+    const taskIds = new Set(tasks.filter((t) => t.project_id === projectId).map((t) => t.id));
+    return taskRefs
+      .filter((r) => taskIds.has(r.task_id))
+      .sort((a, b) => a.task_id - b.task_id || a.ord - b.ord || a.id - b.id);
+  },
+  async setTaskRef(
+    projectId: number,
+    taskId: number,
+    noteId: number,
+    level?: number,
+    ord?: number
+  ) {
+    log("set_task_ref", { projectId, taskId, noteId, level, ord });
+    const lv = level ?? 1;
+    const old = taskRefs.find((r) => r.task_id === taskId && r.note_id === noteId);
+    if (old) {
+      old.level = lv as any;
+      if (ord !== undefined) old.ord = ord;
+      return old.id;
+    }
+    const nextOrd =
+      ord ??
+      taskRefs.filter((r) => r.task_id === taskId).reduce((m, r) => Math.max(m, r.ord), -1) + 1;
+    const ref: TaskRef = {
+      id: rid++,
+      task_id: taskId,
+      note_id: noteId,
+      level: lv as any,
+      ord: nextOrd,
+    };
+    taskRefs.push(ref);
+    return ref.id;
+  },
+  async deleteTaskRef(taskId: number, noteId: number) {
+    log("delete_task_ref", { taskId, noteId });
+    const i = taskRefs.findIndex((r) => r.task_id === taskId && r.note_id === noteId);
+    if (i >= 0) taskRefs.splice(i, 1);
   },
 
   // ---- 写作模块：Markdown 文档 ----
@@ -563,7 +630,7 @@ const LS_KEY = "kanban-mock-state-v1";
 /** 不改变数据的方法，调用后不需要落盘 */
 const READ_ONLY = new Set([
   "bootstrap", "listProjects", "listColumns", "listTasks", "listTags", "listTrash",
-  "listNotes", "listEdges", "listAssets", "getSettings", "diagLog", "diagDb",
+  "listNotes", "listEdges", "listTaskRefs", "listAssets", "getSettings", "diagLog", "diagDb",
   "readAssetDataUrl", "getDataDir", "openAsset", "revealAsset", "openDataDir",
   "findAssetByHash", "listDocs", "dataOverview", "pickFolder", "openProjectDb",
 ]);
@@ -571,7 +638,7 @@ const READ_ONLY = new Set([
 function snapshot(withBlobs: boolean) {
   return {
     v: 1,
-    pid, cid, tid, gid, nid, eid, did,
+    pid, cid, tid, gid, nid, eid, did, rid,
     projects: [...projects],
     columns: [...columns],
     tasks: [...tasks],
@@ -579,6 +646,7 @@ function snapshot(withBlobs: boolean) {
     trash: [...trash],
     notes: [...notes],
     edges: [...edges],
+    taskRefs: [...taskRefs],
     docs: [...docs],
     settings: { ...settings },
     assets: (window as any).__mockAssets || [],
@@ -617,6 +685,7 @@ function loadState() {
     nid = d.nid ?? nid;
     eid = d.eid ?? eid;
     did = d.did ?? did;
+    rid = d.rid ?? rid;
     const put = (arr: any[], src: any) => {
       arr.length = 0;
       if (Array.isArray(src)) arr.push(...src);
@@ -628,6 +697,7 @@ function loadState() {
     put(trash, d.trash);
     put(notes, d.notes);
     put(edges, d.edges);
+    put(taskRefs, (d as any).taskRefs);
     put(docs, d.docs);
     if (d.settings) Object.assign(settings, d.settings);
     (window as any).__mockAssets = d.assets || [];
@@ -638,6 +708,29 @@ function loadState() {
 }
 
 loadState();
+
+// 老存档里没有新字段：读进来时补默认值，避免界面拿到 undefined。
+// 任务编号按「项目内顺序」补一次，跟桌面版打开老库时做的事一致。
+(function upgradeLoadedState() {
+  const byProject = new Map<number, number>();
+  for (const t of tasks) {
+    if (!t.seq) {
+      const cur = byProject.get(t.project_id) ?? 0;
+      t.seq = cur + 1;
+      byProject.set(t.project_id, t.seq);
+    } else {
+      byProject.set(t.project_id, Math.max(byProject.get(t.project_id) ?? 0, t.seq));
+    }
+  }
+  for (const e of edges) {
+    if (!e.kind) e.kind = "decompose";
+    if (e.strength === undefined) e.strength = 0;
+  }
+  for (const n of notes) {
+    if (n.role === undefined) n.role = "";
+    if (n.group_kind === undefined) n.group_kind = "";
+  }
+})();
 
 /** 清空浏览器本地数据（想重置时用） */
 export function clearMockState() {

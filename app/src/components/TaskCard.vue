@@ -106,7 +106,9 @@ function openEdit(e?: Event) {
       </button>
 
       <div class="task-title">
-        {{ task.title }}
+        <span v-if="task.seq" class="task-seq" :title="'任务编号 T' + task.seq + '：跟 AI 交代时直接说这个号'"
+          >T{{ task.seq }}</span
+        >{{ task.title }}
         <span
           v-if="store.taskChildCount(task.id)"
           class="task-kids"
@@ -196,6 +198,19 @@ function openEdit(e?: Event) {
 .task-title {
   flex: 1;
   min-width: 0;
+}
+/* 任务编号：窄栏里也只占三个字符，不挤标题 */
+.task-seq {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  color: var(--text-subtle);
+  background: rgb(0 0 0 / 5%);
+  vertical-align: 1px;
 }
 /* 卡片右上角的动作：平时藏着，悬停才浮出来。
    ⚠️ 用绝对定位而不是占位 —— 栏宽只有 130px 时，两个隐藏按钮会白吃掉 40px，

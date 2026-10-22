@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 302" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#6b7280}
+.w{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#a32d2d;font-weight:600}
+</style>
+
+<rect x="40" y="52" width="90" height="30" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="85" y="67" text-anchor="middle" dominant-baseline="central">D1 品牌手册</text>
+<rect x="196" y="46" width="90" height="30" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="241" y="61" text-anchor="middle" dominant-baseline="central">D2 竞品调研</text>
+<rect x="96" y="176" width="90" height="30" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="141" y="191" text-anchor="middle" dominant-baseline="central">D3 釉色 v2</text>
+<rect x="268" y="196" width="90" height="30" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="313" y="211" text-anchor="middle" dominant-baseline="central">D4 行业报告</text>
+
+
+
+
+
+<path d="M136,72 C240,72 300,96 414,102" fill="none" stroke="#0f6e56" stroke-width="1"/>
+<path d="M286,61 C340,61 370,96 414,98" fill="none" stroke="#0f6e56" stroke-width="1"/>
+<path d="M186,191 C300,191 340,214 418,226" fill="none" stroke="#0f6e56" stroke-width="1"/>
+<path d="M136,72 C300,100 340,180 420,218" fill="none" stroke="#0f6e56" stroke-width="1"/>
+
+
+
+
+<rect x="414" y="86" width="102" height="34" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="t" x="465" y="103" text-anchor="middle" dominant-baseline="central">T1 定调</text>
+<rect x="418" y="208" width="102" height="34" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="t" x="469" y="225" text-anchor="middle" dominant-baseline="central">T2 配色</text>
+<rect x="520" y="136" width="102" height="34" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="t" x="571" y="153" text-anchor="middle" dominant-baseline="central">T3 版式</text>
+
+<text class="w" x="40" y="30">当前白板：连线的含义无法区分</text>
+
+<text class="s" x="40" y="288">每条线代表什么关系，图上没有标记。同一份资料被几个任务引用，也只能沿线逐个清点。</text>
+</svg>

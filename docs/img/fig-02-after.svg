@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 336" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#6b7280}
+.n{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:11px;fill:#a06a1e;font-weight:600}
+.g{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#0f6e56;font-weight:600}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="g" x="40" y="28">调整后：资料在左，任务向右推进</text>
+
+<text class="s" x="40" y="50">资料</text>
+<text class="s" x="168" y="50">第一步</text>
+<text class="s" x="296" y="50">第二步</text>
+<text class="s" x="424" y="50">第三步</text>
+<text class="s" x="552" y="50">交出去</text>
+
+<rect x="40" y="64" width="100" height="32" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="106" width="100" height="32" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="148" width="100" height="32" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="236" width="100" height="32" rx="6" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="5 4"/>
+<text class="t" x="90" y="80" text-anchor="middle" dominant-baseline="central">D1 品牌手册</text>
+<text class="t" x="90" y="122" text-anchor="middle" dominant-baseline="central">D2 竞品调研</text>
+<text class="t" x="90" y="164" text-anchor="middle" dominant-baseline="central">D3 釉色 v2</text>
+<text class="s" x="90" y="252" text-anchor="middle" dominant-baseline="central">D4 行业报告</text>
+<text class="s" x="148" y="252" dominant-baseline="central">没人用</text>
+
+<path d="M140,80 C156,80 156,100 166,100" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a)"/>
+<path d="M140,80 C220,80 240,44 294,58" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a)"/>
+<path d="M140,122 C154,122 154,110 166,110" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a)"/>
+<path d="M140,164 C200,164 240,128 294,124" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a)"/>
+
+<rect x="168" y="86" width="100" height="48" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="n" x="180" y="101" dominant-baseline="central">T1</text>
+<text class="t" x="218" y="118" text-anchor="middle" dominant-baseline="central">定调</text>
+
+<rect x="296" y="86" width="100" height="48" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1.6"/>
+<text class="n" x="308" y="101" dominant-baseline="central">T2</text>
+<text class="t" x="346" y="118" text-anchor="middle" dominant-baseline="central">配色</text>
+
+<rect x="424" y="86" width="100" height="48" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="n" x="436" y="101" dominant-baseline="central">T3</text>
+<text class="t" x="474" y="118" text-anchor="middle" dominant-baseline="central">版式</text>
+
+<rect x="552" y="82" width="100" height="56" rx="7" fill="#e8e4d9" stroke="#6b7280" stroke-width="1"/>
+<text class="t" x="602" y="103" text-anchor="middle" dominant-baseline="central">汇报文稿</text>
+<text class="s" x="602" y="121" text-anchor="middle" dominant-baseline="central">最终交付</text>
+
+<path d="M268,110 L292,110" fill="none" stroke="#0f6e56" stroke-width="1.8" marker-end="url(#a)"/>
+<path d="M396,110 L420,110" fill="none" stroke="#0f6e56" stroke-width="1.8" marker-end="url(#a)"/>
+<path d="M524,110 L548,110" fill="none" stroke="#0f6e56" stroke-width="1.8" marker-end="url(#a)"/>
+
+<text class="s" x="40" y="300">绿色粗线表示先后：T1 完成后开始 T2，T2 完成后开始 T3，最后交付文稿。</text>
+<text class="s" x="40" y="322">淡虚线表示依据：D1 同时支撑 T1 和 T2；D4 没有任何连线，说明它未被使用。</text>
+</svg>

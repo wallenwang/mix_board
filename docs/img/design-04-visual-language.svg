@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 262" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:11px;fill:#6b7280}
+.h{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b;font-weight:600}
+.tw{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#ffffff;font-weight:600}
+.tg{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#0f6e56;font-weight:600}
+.sg{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:11px;fill:#4b7a63}
+.tm{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#7a7466}
+</style>
+
+<text class="s" x="40" y="26">资料状态：靠明度区分，不给每份资料一个颜色</text>
+
+<rect x="40" y="38" width="190" height="44" rx="8" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="tg" x="56" y="56">在用</text>
+<text class="sg" x="56" y="72">被至少一个任务引用</text>
+
+<rect x="250" y="38" width="190" height="44" rx="8" fill="#e8e4d9" stroke="#b4b2a9" stroke-width="1"/>
+<text class="tm" x="266" y="56">过期版本</text>
+<text class="s" x="266" y="72">有更新版本，自动折叠</text>
+
+<rect x="460" y="38" width="190" height="44" rx="8" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="5 4"/>
+<text class="tm" x="476" y="56">未使用</text>
+<text class="s" x="476" y="72">谁都没引用，建议清理</text>
+
+<text class="s" x="40" y="116">依据等级：写在任务卡上，一份资料对不同任务可以不同档</text>
+
+<rect x="40" y="128" width="190" height="44" rx="8" fill="#0f6e56" stroke="none"/>
+<text class="tw" x="56" y="146">必须遵守</text>
+<text class="tw" x="56" y="162" font-size="11" font-weight="400">冲突时以它为准</text>
+
+<rect x="250" y="128" width="190" height="44" rx="8" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="tg" x="266" y="146">可以参考</text>
+<text class="sg" x="266" y="162">没冲突时补充进来</text>
+
+<rect x="460" y="128" width="190" height="44" rx="8" fill="none" stroke="#b4b2a9" stroke-width="1" stroke-dasharray="4 4"/>
+<text class="tm" x="476" y="146">仅作背景</text>
+<text class="s" x="476" y="162">只理解语境，不引用</text>
+
+<text class="s" x="40" y="208">等级属于「谁在用」，不属于资料本身 —— 所以资料池里永远不显示等级，只在任务卡上显示。</text>
+<text class="s" x="40" y="230">互斥 / 版本 / 候选，全部用分组框表达，不画线。</text>
+</svg>

@@ -45,6 +45,8 @@ export interface Task {
   /** whiteboard position (null = not placed yet, auto-layout is used) */
   wx: number | null;
   wy: number | null;
+  /** 项目内编号（T1、T2…）。删除后不回收，0 表示尚未编号 */
+  seq: number;
 }
 
 /** 白板节点类型：便签 / 文本 / 思维导图 / 上传资料 / 分组框 / 甘特图 / 文档 */
@@ -63,7 +65,17 @@ export interface BoardNote {
   file_id: number | null;
   /** JSON 字符串：字号 / 对齐 / 形状等细粒度样式 */
   meta: string;
+  /** 分区的用途：goal/input/constraint/work/output/defer，空 = 未标注 */
+  role: string;
+  /** 特殊分组：candidates 候选组 / versions 版本组，空 = 普通分组 */
+  group_kind: string;
 }
+
+/** 连线的关系类型。默认分解，老数据全是这个，升级后观感不变 */
+export type EdgeKind = "decompose" | "precede" | "evidence" | "produce";
+
+/** 依据的三档。等级挂在关系上，同一份资料对不同任务可以不同档 */
+export type RefLevel = 0 | 1 | 2;
 
 export interface BoardEdge {
   id: number;
@@ -72,6 +84,18 @@ export interface BoardEdge {
   from_id: number;
   to_kind: "task" | "note";
   to_id: number;
+  kind: EdgeKind;
+  /** 只对依据类有意义：0 必须遵守 / 1 可以参考 / 2 仅作背景 */
+  strength: number;
+}
+
+/** 任务用到的一份资料，以及它对这个任务的等级 */
+export interface TaskRef {
+  id: number;
+  task_id: number;
+  note_id: number;
+  level: RefLevel;
+  ord: number;
 }
 
 /** 白板上传的资料（文件实体在应用数据目录 assets/ 下） */

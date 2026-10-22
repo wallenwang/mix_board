@@ -9,7 +9,7 @@ import GanttChart from "./GanttChart.vue";
 import MdEditor from "./MdEditor.vue";
 import AppIcon from "./AppIcon.vue";
 import { priorityOf, isImageFile, fileIcon, formatBytes, extOf, parseSource } from "../types";
-import type { Task, BoardNote, BoardEdge, NodeKind, WbFile, Doc } from "../types";
+import type { Task, BoardNote, BoardEdge, EdgeKind, NodeKind, WbFile, Doc } from "../types";
 import {
   readAsDataURL,
   imageSize,
@@ -245,6 +245,8 @@ function isChrome(t: HTMLElement | null) {
 }
 
 function bgDown(e: MouseEvent) {
+  // 点空白先收起连线菜单（点在菜单上时，菜单自己 stop 了 pointerdown，走不到这里）
+  if (edgePick.value) edgePick.value = null;
   // 中键：任何地方都能平移
   if (e.button === 1) {
     e.preventDefault();
@@ -1307,10 +1309,17 @@ async function connect(
       e.to_kind === from.kind &&
       e.to_id === from.id
   );
+  // 资料 → 任务：这是"这个任务用这份材料"，也就是依据关系。
+  // 其余情况按默认的分解走，用户点连线菜单可以改。
+  const autoKind: EdgeKind =
+    from.kind === "note" && toKind === "task" ? "evidence" : "decompose";
   try {
     if (rev) {
       await api.deleteEdge(rev.id);
-      await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id);
+      await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
+      if (autoKind === "evidence") {
+        await api.setTaskRef(store.currentProjectId, to.id, from.id, 1);
+      }
       await store.refreshBoard();
       ElMessage.success("已反转上下级方向（先点的是上级）");
       return;
@@ -1320,8 +1329,15 @@ async function connect(
       ElMessage.warning("这两个卡片已经在同一条上下级链上了，再连会绕成圈");
       return;
     }
-    await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id);
+    await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
+    if (autoKind === "evidence") {
+      // 默认「可以参考」，任务卡上点一下就换档
+      await api.setTaskRef(store.currentProjectId, to.id, from.id, 1);
+    }
     await store.refreshBoard();
+    if (autoKind === "evidence") {
+      ElMessage.success("已作为依据挂到这个任务上（任务卡底部可以改等级）");
+    }
   } catch (e) {
     reportError("连接节点", e);
   }
@@ -1473,21 +1489,99 @@ const visibleEdges = computed(() =>
   store.edges.filter((e) => nodeExists(e.from_kind, e.from_id) && nodeExists(e.to_kind, e.to_id))
 );
 
+/** 点中的连线：在点击处浮出短工具条。先选中再操作，避免单击就把线删掉 */
+const edgePick = ref<{ id: number; x: number; y: number } | null>(null);
+
+/** 四种关系。默认分解，其余三种只在真要表达时才动，平时界面是干净的 */
+const EDGE_KIND_META: { kind: EdgeKind; label: string; hint: string }[] = [
+  { kind: "decompose", label: "分解", hint: "A 拆成 B（上下级）" },
+  { kind: "precede", label: "先后", hint: "A 做完才能做 B" },
+  { kind: "evidence", label: "依据", hint: "A 是 B 的材料" },
+  { kind: "produce", label: "产出", hint: "A 是 B 交出来的东西" },
+];
+
+/** 世界坐标 → 画布内像素（工具条不跟着缩放，所以不能用世界坐标） */
+function worldToScreen(x: number, y: number) {
+  return { x: x * zoom.value + panX.value, y: y * zoom.value + panY.value };
+}
+
+function openEdgeMenu(e: BoardEdge, ev: MouseEvent) {
+  const r = canvasRef.value?.getBoundingClientRect();
+  edgePick.value = {
+    id: e.id,
+    x: ev.clientX - (r?.left ?? 0),
+    y: ev.clientY - (r?.top ?? 0),
+  };
+}
+
+const edgeMenuKind = computed<EdgeKind | "">(
+  () => store.edges.find((e) => e.id === edgePick.value?.id)?.kind ?? ""
+);
+
+async function setEdgeKind(kind: EdgeKind) {
+  const cur = edgePick.value;
+  if (!cur) return;
+  try {
+    await api.updateEdge(cur.id, { kind });
+    await store.refreshBoard();
+  } catch (e) {
+    reportError("改连线类型", e);
+  }
+}
+
+/** 菜单里的删除：按当前选中的 id 删，模板里就不用写复杂表达式 */
+async function removeEdgeById() {
+  const id = edgePick.value?.id;
+  if (id == null) return;
+  const e = store.edges.find((x) => x.id === id);
+  if (e) await removeEdge(e);
+}
+
 async function removeEdge(e: BoardEdge) {
   try {
-    await ElMessageBox.confirm("删除这条连线？", "删除连线", {
-      type: "warning",
-      confirmButtonText: "删除",
-      cancelButtonText: "取消",
-    });
-  } catch {
-    return;
-  }
-  try {
     await api.deleteEdge(e.id);
+    if (edgePick.value?.id === e.id) edgePick.value = null;
     await store.refreshBoard();
   } catch (err) {
     reportError("删除连线", err);
+  }
+}
+
+// ---- 依据三档：等级挂在关系上，同一份资料对不同任务可以是不同档 ----
+const REF_LEVELS: { v: number; label: string; hint: string }[] = [
+  { v: 0, label: "必须遵守", hint: "冲突时以它为准" },
+  { v: 1, label: "可以参考", hint: "没冲突时补充进来" },
+  { v: 2, label: "仅作背景", hint: "只用来理解语境，不引用" },
+];
+
+function refLabel(level: number) {
+  return REF_LEVELS.find((x) => x.v === level)?.label ?? "可以参考";
+}
+
+/** 资料节点在任务卡上的短名：文件名优先，其次节点文字 */
+function noteLabel(noteId: number): string {
+  const n = store.notes.find((x) => x.id === noteId);
+  if (!n) return "资料";
+  const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+  const raw = (f?.name || n.text || "资料").trim() || "资料";
+  return raw.length > 12 ? raw.slice(0, 11) + "…" : raw;
+}
+
+/** 点一下换一档：必须遵守 → 可以参考 → 仅作背景 → 必须遵守 */
+async function cycleRefLevel(taskId: number, noteId: number, level: number) {
+  const next = (level + 1) % 3;
+  try {
+    await store.setRef(taskId, noteId, next);
+  } catch (e) {
+    reportError("改依据等级", e);
+  }
+}
+
+async function dropRef(taskId: number, noteId: number) {
+  try {
+    await store.dropRef(taskId, noteId);
+  } catch (e) {
+    reportError("移除依据", e);
   }
 }
 
@@ -2538,6 +2632,12 @@ async function buildScene() {
       done: !!t.completed_at,
       sub,
       subColor: pr.color,
+      // 编号与依据都要画进导出图，屏幕上有的缺一个就对不上
+      seq: t.seq,
+      refs: store.refsOfTask(t.id).map((r) => ({
+        label: noteLabel(r.note_id),
+        level: r.level,
+      })),
       style: domStyle("task", t.id, "task"),
     });
   }
@@ -2584,6 +2684,13 @@ async function buildScene() {
   const host = canvasRef.value ?? document.documentElement;
   const cs = getComputedStyle(host);
   const edgeColor = cs.getPropertyValue("--text-faint").trim() || "#a8b3bd";
+  // 线宽跟屏幕上的 .edge-line.k-* 对齐，否则导出图里四种关系会挤成一样粗细
+  const EDGE_W: Record<string, number> = {
+    decompose: 1.6,
+    precede: 2.4,
+    evidence: 1.8,
+    produce: 3.4,
+  };
   const lines: ExportLine[] = visibleEdgeGeom.value.map((g) => ({
     d: g.d,
     x1: g.x1,
@@ -2592,7 +2699,8 @@ async function buildScene() {
     y2: g.y2,
     angle: g.angle,
     color: edgeColor,
-    width: 1.7,
+    width: EDGE_W[g.e.kind] ?? 1.7,
+    kind: g.e.kind,
   }));
 
   const bg =
@@ -3266,6 +3374,7 @@ function prio(t: Task) {
     :class="{
       'drop-active': dragOver,
       linking: !!linkFrom,
+      'dragging-link': !!linking,
       'link-mode': tool === 'link',
       'space-pan': spaceDown,
     }"
@@ -3484,6 +3593,31 @@ function prio(t: Task) {
       <template v-if="selCount"> · 已选 {{ selCount }} 个</template>
     </div>
 
+    <!-- 连线短菜单：点线才出来，不与常驻 UI 抢位置 -->
+    <div
+      v-if="edgePick"
+      class="edge-menu"
+      :style="{ left: edgePick.x + 'px', top: edgePick.y + 'px' }"
+      @pointerdown.stop
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <button class="em-del" title="删除这条连线" @click="removeEdgeById">
+        删除
+      </button>
+      <span class="em-sep"></span>
+      <button
+        v-for="m in EDGE_KIND_META"
+        :key="m.kind"
+        class="em-kind"
+        :class="{ on: edgeMenuKind === m.kind }"
+        :title="m.hint"
+        @click="setEdgeKind(m.kind)"
+      >
+        {{ m.label }}
+      </button>
+    </div>
+
     <div class="wb-content" :style="contentStyle">
       <!-- 框选矩形 -->
       <div v-if="marquee" class="wb-marquee" :style="marqueeStyle"></div>
@@ -3595,8 +3729,13 @@ function prio(t: Task) {
           </marker>
         </defs>
         <g v-for="g in visibleEdgeGeom" :key="g.e.id">
-          <path class="edge-line" :d="g.d" marker-end="url(#wb-arrow)" />
-          <path class="edge-hit" :d="g.d" @click="removeEdge(g.e)" />
+          <path
+            class="edge-line"
+            :class="['k-' + g.e.kind, { picked: edgePick && edgePick.id === g.e.id }]"
+            :d="g.d"
+            marker-end="url(#wb-arrow)"
+          />
+          <path class="edge-hit" :d="g.d" @click.stop="openEdgeMenu(g.e, $event)" />
         </g>
         <path
           v-if="linking"
@@ -3655,7 +3794,14 @@ function prio(t: Task) {
             @blur="commitTaskTitle(t)"
             @keydown.esc="editingTask = null"
           />
-          <div v-else class="tn-title">{{ t.title }}</div>
+          <div v-else class="tn-title">
+            <span
+              v-if="t.seq"
+              class="tn-seq"
+              :title="'任务编号 T' + t.seq + '：跟 AI 交代时直接说这个号就行'"
+              >T{{ t.seq }}</span
+            >{{ t.title }}
+          </div>
           <div class="tn-sub">
             <span class="tn-col" :style="{ color: prio(t).color }">{{ colName(t) }}</span>
             <span v-if="t.priority !== 2" :style="{ color: prio(t).color }">{{ prio(t).label }}</span>
@@ -3665,6 +3811,24 @@ function prio(t: Task) {
             >
           </div>
           <div v-if="t.description" class="tn-desc" :title="t.description">{{ t.description }}</div>
+          <div v-if="store.refsOfTask(t.id).length" class="tn-refs" @pointerdown.stop>
+            <span
+              v-for="r in store.refsOfTask(t.id)"
+              :key="r.id"
+              class="tn-ref"
+              :class="'lv-' + r.level"
+              :title="
+                refLabel(r.level) +
+                '：' +
+                noteLabel(r.note_id) +
+                '（左键换档，右键移除）'
+              "
+              @click.stop="cycleRefLevel(t.id, r.note_id, r.level)"
+              @contextmenu.prevent.stop="dropRef(t.id, r.note_id)"
+            >
+              {{ noteLabel(r.note_id) }}
+            </span>
+          </div>
         </template>
 
         <div class="node-tools">
@@ -4712,6 +4876,54 @@ function prio(t: Task) {
   transform-origin: 0 0;
 }
 
+/* 连线短菜单：点线才出现，宽度压在 280px 内，删除固定在最左并隔开 */
+.edge-menu {
+  position: absolute;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-pop, 0 8px 24px rgb(0 0 0 / 14%));
+  /* 浮在点击点上方，免得盖住被点的那根线 */
+  transform: translate(-50%, calc(-100% - 8px));
+  white-space: nowrap;
+}
+.edge-menu button {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.edge-menu button:hover {
+  background: var(--fill-weak, rgb(0 0 0 / 6%));
+}
+.edge-menu .em-del {
+  color: #c45656;
+  font-weight: 600;
+}
+.edge-menu .em-del:hover {
+  background: rgb(196 86 86 / 12%);
+}
+.edge-menu .em-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: var(--hairline);
+}
+.edge-menu .em-kind.on {
+  background: var(--accent-weak, rgb(64 158 255 / 14%));
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .wb-edges {
   position: absolute;
   top: 0;
@@ -4733,6 +4945,28 @@ function prio(t: Task) {
   stroke: var(--text-faint);
   stroke-width: 1.7;
   stroke-linecap: round;
+}
+/* 四种关系靠线型区分，不额外加颜色 —— 线一多，颜色最先失控 */
+.edge-line.k-decompose {
+  stroke-width: 1.6;
+}
+.edge-line.k-precede {
+  stroke-width: 2.4;
+}
+.edge-line.k-evidence {
+  stroke-width: 1.8;
+  stroke-dasharray: 1 5;
+  stroke-linecap: round;
+}
+.edge-line.k-produce {
+  stroke-width: 3.4;
+  opacity: 0.6;
+}
+/* 点中的那条线：亮一档，配合菜单指示"改的是它" */
+.edge-line.picked {
+  stroke: var(--accent);
+  stroke-width: 2.6;
+  opacity: 1;
 }
 .edge-line.linking {
   stroke: var(--accent);
@@ -4819,6 +5053,59 @@ function prio(t: Task) {
 }
 .tn-col {
   color: var(--text-subtle);
+}
+/* 任务编号：一眼能念出来的短标号，跟 AI 说话时直接说 T2 */
+.tn-seq {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  letter-spacing: 0.02em;
+  color: var(--text-subtle);
+  background: var(--fill-weak, rgb(0 0 0 / 5%));
+  vertical-align: 1px;
+}
+/* 依据 chip：三档用明暗区分，不用颜色堆叠 —— 一张卡上挂五份材料也不会花 */
+.tn-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.tn-ref {
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid transparent;
+}
+/* 必须遵守：实心深色 */
+.tn-ref.lv-0 {
+  color: var(--bg-elevated);
+  background: var(--text-subtle);
+}
+/* 可以参考：描边 */
+.tn-ref.lv-1 {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  background: var(--bg-elevated);
+}
+/* 仅作背景：灰字虚线 */
+.tn-ref.lv-2 {
+  color: var(--text-faint);
+  border-style: dashed;
+  border-color: var(--hairline-strong);
+}
+.tn-ref:hover {
+  filter: brightness(0.96);
 }
 .tn-desc {
   margin-top: 3px;
@@ -5264,7 +5551,8 @@ function prio(t: Task) {
 
 /* ---------- 输入 / 输出端口 ----------
    右侧圆点 = 输出（本卡片当上级）；左侧圆点 = 输入（本卡片当下级）。
-   默认半透明，提示「这里能拉线」；悬停整张卡片或进入连线模式时点亮。 */
+   平时完全隐藏，鼠标移到卡片上才出现 —— 常显的两个小圆点在几十张卡片时很吵。
+   正在拖线时全部半显，指示哪些地方可以落点。 */
 .node-port {
   position: absolute;
   top: 50%;
@@ -5276,7 +5564,7 @@ function prio(t: Task) {
   border: 2px solid var(--accent);
   cursor: crosshair;
   z-index: 5;
-  opacity: 0.55;
+  opacity: 0;
   transition: opacity 0.13s var(--ease), transform 0.13s var(--ease),
     background 0.13s var(--ease);
 }
@@ -5299,6 +5587,13 @@ function prio(t: Task) {
 .wb-node:hover .node-port,
 .wb-node.sel .node-port,
 .wb-canvas.link-mode .node-port {
+  opacity: 1;
+}
+/* 拖线中：所有端口半显，指出能连到哪儿；光标停在哪个卡片上，那个卡片全亮 */
+.wb-canvas.dragging-link .node-port {
+  opacity: 0.35;
+}
+.wb-canvas.dragging-link .wb-node:hover .node-port {
   opacity: 1;
 }
 .node-port:hover {

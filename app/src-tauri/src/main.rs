@@ -257,6 +257,8 @@ fn main() {
             commands::list_notes, commands::create_note, commands::update_note,
             commands::delete_note,
             commands::list_edges, commands::create_edge, commands::delete_edge,
+            commands::update_edge,
+            commands::list_task_refs, commands::set_task_ref, commands::delete_task_ref,
             commands::import_asset, commands::list_assets, commands::delete_asset,
             commands::open_asset, commands::reveal_asset, commands::read_asset_data_url,
             commands::find_asset_by_hash,

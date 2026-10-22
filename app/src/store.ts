@@ -3,7 +3,17 @@ import { ref, computed } from "vue";
 import { api } from "./api";
 import { daysLeft } from "./due";
 import { reportError } from "./diag";
-import type { Project, Column, Task, Tag, BoardNote, BoardEdge, WbFile, Doc } from "./types";
+import type {
+  Project,
+  Column,
+  Task,
+  Tag,
+  BoardNote,
+  BoardEdge,
+  TaskRef,
+  WbFile,
+  Doc,
+} from "./types";
 
 export const useBoardStore = defineStore("board", () => {
   const projects = ref<Project[]>([]);
@@ -12,6 +22,8 @@ export const useBoardStore = defineStore("board", () => {
   const tags = ref<Tag[]>([]);
   const notes = ref<BoardNote[]>([]);
   const edges = ref<BoardEdge[]>([]);
+  /** 任务用到哪些资料、各是什么等级（等级挂在关系上，不在资料上） */
+  const taskRefs = ref<TaskRef[]>([]);
   const assets = ref<WbFile[]>([]);
   const docs = ref<Doc[]>([]);
   const currentProjectId = ref<number | null>(null);
@@ -88,12 +100,13 @@ export const useBoardStore = defineStore("board", () => {
     // 一个项目一份库：先让后端把这个项目的库打开，再读数据
     await api.openProjectDb(id);
     currentProjectId.value = id;
-    const [cols, tsk, tg, nts, eds, fls, dcs] = await Promise.all([
+    const [cols, tsk, tg, nts, eds, refs, fls, dcs] = await Promise.all([
       api.listColumns(id),
       api.listTasks(id),
       api.listTags(id),
       api.listNotes(id),
       api.listEdges(id),
+      api.listTaskRefs(id),
       api.listAssets(id),
       api.listDocs(id),
     ]);
@@ -101,6 +114,7 @@ export const useBoardStore = defineStore("board", () => {
     tags.value = tg;
     notes.value = nts;
     edges.value = eds;
+    taskRefs.value = refs;
     assets.value = fls;
     docs.value = dcs;
     rebuildByCol(tsk);
@@ -135,14 +149,49 @@ export const useBoardStore = defineStore("board", () => {
 
   async function refreshBoard() {
     if (currentProjectId.value == null) return;
-    const [nts, eds, fls] = await Promise.all([
+    const [nts, eds, refs, fls] = await Promise.all([
       api.listNotes(currentProjectId.value),
       api.listEdges(currentProjectId.value),
+      api.listTaskRefs(currentProjectId.value),
       api.listAssets(currentProjectId.value),
     ]);
     notes.value = nts;
     edges.value = eds;
+    taskRefs.value = refs;
     assets.value = fls;
+  }
+
+  // ---- 任务 ↔ 资料 ----
+
+  /** 这个任务用到的资料，按顺位排 */
+  function refsOfTask(taskId: number): TaskRef[] {
+    return taskRefs.value
+      .filter((r) => r.task_id === taskId)
+      .sort((a, b) => a.ord - b.ord || a.id - b.id);
+  }
+
+  /** 这份资料被哪些任务用了 */
+  function tasksUsingNote(noteId: number): number[] {
+    return taskRefs.value.filter((r) => r.note_id === noteId).map((r) => r.task_id);
+  }
+
+  /** 资料对某个任务的等级：0 必须遵守 / 1 可以参考 / 2 仅作背景，没挂返回 null */
+  function refLevelOf(taskId: number, noteId: number): number | null {
+    const r = taskRefs.value.find((x) => x.task_id === taskId && x.note_id === noteId);
+    return r ? r.level : null;
+  }
+
+  /** 挂一份资料到任务（已存在则改等级） */
+  async function setRef(taskId: number, noteId: number, level: number) {
+    if (currentProjectId.value == null) return;
+    await api.setTaskRef(currentProjectId.value, taskId, noteId, level);
+    taskRefs.value = await api.listTaskRefs(currentProjectId.value);
+  }
+
+  async function dropRef(taskId: number, noteId: number) {
+    await api.deleteTaskRef(taskId, noteId);
+    if (currentProjectId.value == null) return;
+    taskRefs.value = await api.listTaskRefs(currentProjectId.value);
   }
 
   async function refreshProjects() {
@@ -392,6 +441,7 @@ export const useBoardStore = defineStore("board", () => {
     allTasks, tagOf, fileById, sortedCol, visibleCount,
     taskParentOf, taskDepth, taskDescendants, taskChildCount,
     toggleDone, setDates, setProgress, setBarColor, colProgress, projectProgress, overdueTasks,
+    taskRefs, refsOfTask, tasksUsingNote, refLevelOf, setRef, dropRef,
     loadBootstrap, loadProject, refreshTasks, refreshColumns, refreshProjects, refreshBoard,
     refreshDocs, docFocus, focusDoc, docTouched, touchDoc, docById,
     activeDocId, setActiveDoc, docInsert, insertIntoDoc, takeDocInsert,

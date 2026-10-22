@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 286" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:11px;fill:#6b7280}
+.h{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b;font-weight:600}
+.g{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#0f6e56;font-weight:600}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="g" x="30" y="30">说明由任务卡上的字段自动拼接</text>
+
+<rect x="30" y="80" width="180" height="120" rx="8" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="h" x="48" y="102" dominant-baseline="central">T2 配色</text>
+<text class="s" x="48" y="128" dominant-baseline="central">必须遵守：D1 D3</text>
+<text class="s" x="48" y="148" dominant-baseline="central">可以参考：D2</text>
+<text class="s" x="48" y="168" dominant-baseline="central">仅作背景：D4</text>
+<text class="s" x="48" y="188" dominant-baseline="central">上游：T1 已完成</text>
+
+<rect x="250" y="60" width="180" height="160" rx="8" fill="#ffffff" stroke="#b4b2a9" stroke-width="1"/>
+<text class="h" x="268" y="82" dominant-baseline="central">一份指令</text>
+<rect x="266" y="96" width="148" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="110" width="120" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="124" width="140" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="138" width="96" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="152" width="134" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="166" width="110" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="180" width="142" height="7" rx="3.5" fill="#e8e4d9"/>
+<rect x="266" y="194" width="86" height="7" rx="3.5" fill="#e8e4d9"/>
+
+<rect x="470" y="80" width="180" height="120" rx="8" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="h" x="560" y="130" text-anchor="middle" dominant-baseline="central">粘贴给 AI</text>
+<text class="s" x="560" y="152" text-anchor="middle" dominant-baseline="central">它知道背景、依据、要交什么</text>
+
+<path d="M214,140 L246,140" fill="none" stroke="#6b7280" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M434,140 L466,140" fill="none" stroke="#6b7280" stroke-width="1.4" marker-end="url(#a)"/>
+
+<text class="s" x="30" y="228">任务卡上已经记录了编号、三档依据和上下游关系。</text>
+<text class="s" x="30" y="248">这段说明由上述字段拼接而成，不需要另外撰写。</text>
+<text class="s" x="30" y="272">使用方式是选中任务、复制、粘贴到对话窗口，共三步。</text>
+</svg>

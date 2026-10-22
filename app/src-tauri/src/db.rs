@@ -90,6 +90,21 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         CREATE INDEX IF NOT EXISTS idx_edges_project ON board_edges(project_id);
 
+        -- 任务 → 资料的依据关系。等级记在每条关系上，不记在资料上：
+        -- 同一份资料对任务 A 可以是必须遵守，对任务 B 只是背景。
+        CREATE TABLE IF NOT EXISTS task_refs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            note_id    INTEGER NOT NULL REFERENCES board_notes(id) ON DELETE CASCADE,
+            level      INTEGER NOT NULL DEFAULT 1,
+            ord        INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(task_id, note_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_taskrefs_task ON task_refs(task_id);
+        CREATE INDEX IF NOT EXISTS idx_taskrefs_note ON task_refs(note_id);
+
         -- 白板上传的资料 / 图片：文件本体落在 <app_data>/assets/，库里只存元信息 + 路径
         CREATE TABLE IF NOT EXISTS wb_files (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +158,14 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !task_cols.iter().any(|c| c == "bar_color") {
         conn.execute("ALTER TABLE tasks ADD COLUMN bar_color TEXT", [])?;
     }
+    // Migration: 项目内任务编号（T1、T2…）。删掉的编号不回收，
+    // 否则三个月前跟 AI 说的"任务 2"会指向另一个任务。0 表示尚未编号。
+    if !task_cols.iter().any(|c| c == "seq") {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
 
     // Migration: whiteboard notes grow from "just a sticky note" into a generic
     // node (sticky / text / mind-map / uploaded file / group box).
@@ -162,6 +185,28 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     add_note_col("h", "h REAL")?;
     add_note_col("file_id", "file_id INTEGER")?;
     add_note_col("meta", "meta TEXT NOT NULL DEFAULT ''")?;
+    // Migration: 分区的用途角色（goal / input / constraint / work / output / defer）
+    // 与特殊分组的类型（candidates 候选组 / versions 版本组）。留空即普通分组。
+    add_note_col("role", "role TEXT NOT NULL DEFAULT ''")?;
+    add_note_col("group_kind", "group_kind TEXT NOT NULL DEFAULT ''")?;
+
+    // Migration: 连线的语义类型。老数据全部落在 decompose（分解）上，
+    // 也就是升级前后的观感一致，不会突然冒出一堆看不懂的线型。
+    let edge_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(board_edges)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let add_edge_col = |name: &str, ddl: &str| -> Result<(), rusqlite::Error> {
+        if !edge_cols.iter().any(|c| c == name) {
+            conn.execute(&format!("ALTER TABLE board_edges ADD COLUMN {ddl}"), [])?;
+        }
+        Ok(())
+    };
+    add_edge_col("kind", "kind TEXT NOT NULL DEFAULT 'decompose'")?;
+    // strength 只给"依据"用：0=必须遵守 1=可以参考 2=仅作背景。
+    // 不存权重数值 —— 没人说得清该给 70 还是 75。
+    add_edge_col("strength", "strength INTEGER NOT NULL DEFAULT 0")?;
 
     // Migration: 资料内容指纹 —— 同一份文件重复上传时直接复用，不占两份空间。
     let file_cols: Vec<String> = {

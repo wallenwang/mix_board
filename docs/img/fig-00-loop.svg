@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 300" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;fill:#1b212b;font-weight:600}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:11px;fill:#6b7280}
+.g{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#0f6e56;font-weight:600}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="g" x="30" y="30">从资料到成果，一共四步</text>
+
+<rect x="30" y="90" width="120" height="84" rx="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="90" y="120" text-anchor="middle" dominant-baseline="central">摆清楚</text>
+<text class="s" x="90" y="142" text-anchor="middle" dominant-baseline="central">资料、任务</text>
+<text class="s" x="90" y="158" text-anchor="middle" dominant-baseline="central">谁用谁、谁先谁后</text>
+
+<rect x="190" y="90" width="120" height="84" rx="9" fill="#f7f5f0" stroke="#b4b2a9" stroke-width="1"/>
+<text class="t" x="250" y="120" text-anchor="middle" dominant-baseline="central">翻译</text>
+<text class="s" x="250" y="142" text-anchor="middle" dominant-baseline="central">自动写成</text>
+<text class="s" x="250" y="158" text-anchor="middle" dominant-baseline="central">AI 读得懂的说明书</text>
+
+<rect x="350" y="90" width="120" height="84" rx="9" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="t" x="410" y="120" text-anchor="middle" dominant-baseline="central">AI 出成果</text>
+<text class="s" x="410" y="142" text-anchor="middle" dominant-baseline="central">方案、文稿</text>
+<text class="s" x="410" y="158" text-anchor="middle" dominant-baseline="central">章节、诊断</text>
+
+<rect x="510" y="90" width="120" height="84" rx="9" fill="#e8e4d9" stroke="#6b7280" stroke-width="1"/>
+<text class="t" x="570" y="120" text-anchor="middle" dominant-baseline="central">回到项目</text>
+<text class="s" x="570" y="142" text-anchor="middle" dominant-baseline="central">存成文档</text>
+<text class="s" x="570" y="158" text-anchor="middle" dominant-baseline="central">挂在那个任务下</text>
+
+<path d="M154,132 L186,132" fill="none" stroke="#6b7280" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M314,132 L346,132" fill="none" stroke="#6b7280" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M474,132 L506,132" fill="none" stroke="#6b7280" stroke-width="1.4" marker-end="url(#a)"/>
+
+<text class="s" x="90" y="78" text-anchor="middle">你自己做</text>
+<text class="s" x="250" y="78" text-anchor="middle">软件做</text>
+<text class="s" x="410" y="78" text-anchor="middle">AI 做</text>
+<text class="s" x="570" y="78" text-anchor="middle">你确认一下</text>
+
+<path d="M570,176 L570,212 L90,212 L90,180" fill="none" stroke="#0f6e56" stroke-width="1" stroke-dasharray="5 4" marker-end="url(#a)"/>
+<text class="s" x="330" y="256" text-anchor="middle">产出回到项目后，下一次生成时可以直接读取</text>
+</svg>

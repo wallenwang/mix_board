@@ -7,6 +7,8 @@ import type {
   TrashItem,
   BoardNote,
   BoardEdge,
+  EdgeKind,
+  TaskRef,
   WbFile,
   Doc,
 } from "./types";
@@ -99,6 +101,7 @@ const real = {
       due_date?: string | null;
       start_date?: string | null;
       progress?: number | null;
+      bar_color?: string | null;
       completed?: boolean;
       tags?: number[];
     }
@@ -149,6 +152,8 @@ const real = {
       h?: number | null;
       file_id?: number | null;
       meta?: string;
+      role?: string;
+      group_kind?: string;
     }
   ) => invoke<void>("update_note", { id, patch }),
   deleteNote: (id: number) => invoke<void>("delete_note", { id }),
@@ -160,7 +165,8 @@ const real = {
     fromKind: "task" | "note",
     fromId: number,
     toKind: "task" | "note",
-    toId: number
+    toId: number,
+    kind?: EdgeKind
   ) =>
     invoke<number>("create_edge", {
       projectId,
@@ -168,8 +174,26 @@ const real = {
       fromId,
       toKind,
       toId,
+      kind,
     }),
+  /** 改一条连线的关系类型 / 等级（不改就传 undefined） */
+  updateEdge: (id: number, patch: { kind?: EdgeKind; strength?: number }) =>
+    invoke<void>("update_edge", { id, kind: patch.kind, strength: patch.strength }),
   deleteEdge: (id: number) => invoke<void>("delete_edge", { id }),
+
+  // 任务用到的资料与等级（等级挂在关系上，不在资料上）
+  listTaskRefs: (projectId: number) => invoke<TaskRef[]>("list_task_refs", { projectId }),
+  /** 挂一份资料到任务，或改它这条关系上的等级 */
+  setTaskRef: (
+    projectId: number,
+    taskId: number,
+    noteId: number,
+    level?: number,
+    ord?: number
+  ) =>
+    invoke<number>("set_task_ref", { projectId, taskId, noteId, level, ord }),
+  deleteTaskRef: (taskId: number, noteId: number) =>
+    invoke<void>("delete_task_ref", { taskId, noteId }),
 
   // whiteboard assets (uploaded files / images, stored under <app_data>/assets)
   listAssets: (projectId: number) => invoke<WbFile[]>("list_assets", { projectId }),

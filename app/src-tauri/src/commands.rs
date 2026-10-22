@@ -73,6 +73,46 @@ pub struct GlobalDb(pub std::sync::Mutex<Connection>);
 /// ⚠️ 项目库里有一行 `projects` 镜像记录 —— 因为 columns/tasks/board_notes/wb_files
 /// 的 `project_id` 都带外键指向 projects(id)，库里没有这一行的话**所有插入都会失败**。
 /// 另外 `project_folder_name()` 也直接读它。
+/// 给还没有编号的任务补上项目内序号（T1、T2…）。
+///
+/// 只处理 seq 为 0 的行，新号从已有的最大值往后接着排，所以反复打开库不会重号；
+/// 删掉的任务号也不回收 —— 否则三个月前跟 AI 说的"任务 2"会指向另一个任务。
+/// 顺序按看板列顺序、列内卡片顺序，跟眼睛看到的一致。
+fn backfill_task_seq(c: &Connection) -> Result<(), String> {
+    let max_seq: i64 = c
+        .query_row("SELECT COALESCE(MAX(seq), 0) FROM tasks", [], |r| r.get(0))
+        .map_err(map_err)?;
+    let ids: Vec<i64> = {
+        let mut stmt = c
+            .prepare(
+                "SELECT t.id FROM tasks t
+                 LEFT JOIN columns c ON c.id = t.column_id
+                 WHERE t.seq IS NULL OR t.seq <= 0
+                 ORDER BY COALESCE(c.sort_order, 0) ASC,
+                          COALESCE(t.sort_order, 0) ASC,
+                          t.id ASC",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(map_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_err)?
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut next = max_seq + 1;
+    for id in ids {
+        c.execute(
+            "UPDATE tasks SET seq = ?1 WHERE id = ?2",
+            params![next, id],
+        )
+        .map_err(map_err)?;
+        next += 1;
+    }
+    Ok(())
+}
+
 pub fn open_project_db_at(
     root: &std::path::Path,
     id: i64,
@@ -110,6 +150,8 @@ pub fn open_project_db_at(
     }
     let _ = set_setting(&c, "folder", folder);
     let _ = set_setting(&c, "project_name", name);
+    // 老项目第一次打开时补齐任务编号；之后 seq 已经齐全，这一步等于空跑。
+    let _ = backfill_task_seq(&c);
     Ok(c)
 }
 
@@ -437,6 +479,8 @@ pub struct TaskOut {
     pub progress: Option<i64>,
     /// 甘特条手动配色；空 = 按紧迫度自动配色
     pub bar_color: Option<String>,
+    /// 项目内编号（T1、T2…）。删除后不回收，0 表示尚未编号
+    pub seq: i64,
 }
 
 #[tauri::command]
@@ -445,7 +489,7 @@ pub fn list_tasks(db: State<Db>, project_id: i64) -> Result<Vec<TaskOut>, String
     let mut stmt = conn
         .prepare(
             "SELECT id,project_id,column_id,title,description,priority,due_date,
-                    sort_order,created_at,updated_at,completed_at,wx,wy,start_date,progress,bar_color
+                    sort_order,created_at,updated_at,completed_at,wx,wy,start_date,progress,bar_color,seq
              FROM tasks WHERE project_id=?1 AND deleted_at IS NULL
              ORDER BY sort_order, id",
         )
@@ -470,6 +514,7 @@ pub fn list_tasks(db: State<Db>, project_id: i64) -> Result<Vec<TaskOut>, String
                 start_date: r.get(13)?,
                 progress: r.get(14)?,
                 bar_color: r.get(15)?,
+                seq: r.get(16)?,
             })
         })
         .map_err(map_err)?
@@ -504,9 +549,13 @@ pub struct NewTask {
 pub fn create_task(db: State<Db>, task: NewTask) -> Result<i64, String> {
     let conn = db.0.lock().map_err(map_err)?;
     let so = next_order(&conn, "tasks", "sort_order", Some(("column_id", task.column_id)))?;
+    // 新任务当场编号，界面上立刻能显示；号不回收，删掉的不会再给别人
+    let seq: i64 = conn
+        .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM tasks", [], |r| r.get(0))
+        .map_err(map_err)?;
     conn.execute(
-        "INSERT INTO tasks(project_id,column_id,title,description,priority,due_date,start_date,sort_order)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO tasks(project_id,column_id,title,description,priority,due_date,start_date,sort_order,seq)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             task.project_id,
             task.column_id,
@@ -515,7 +564,8 @@ pub fn create_task(db: State<Db>, task: NewTask) -> Result<i64, String> {
             task.priority.unwrap_or(2),
             task.due_date,
             task.start_date,
-            so
+            so,
+            seq
         ],
     )
     .map_err(map_err)?;
@@ -845,10 +895,14 @@ pub struct NoteOut {
     pub h: Option<f64>,
     pub file_id: Option<i64>,
     pub meta: String,
+    /// 分区的用途：goal / input / constraint / work / output / defer，空 = 未标注
+    pub role: String,
+    /// 特殊分组类型：candidates 候选组 / versions 版本组，空 = 普通分组
+    pub group_kind: String,
 }
 
 const NOTE_SELECT: &str =
-    "SELECT id,project_id,x,y,text,color,kind,w,h,file_id,meta FROM board_notes";
+    "SELECT id,project_id,x,y,text,color,kind,w,h,file_id,meta,role,group_kind FROM board_notes";
 
 fn row_to_note(r: &Row) -> rusqlite::Result<NoteOut> {
     Ok(NoteOut {
@@ -863,6 +917,8 @@ fn row_to_note(r: &Row) -> rusqlite::Result<NoteOut> {
         h: r.get(8)?,
         file_id: r.get(9)?,
         meta: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        role: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        group_kind: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
     })
 }
 
@@ -922,6 +978,8 @@ pub struct NotePatch {
     pub h: Option<f64>,
     pub file_id: Option<i64>,
     pub meta: Option<String>,
+    pub role: Option<String>,
+    pub group_kind: Option<String>,
 }
 
 #[tauri::command]
@@ -948,6 +1006,8 @@ pub fn update_note(db: State<Db>, id: i64, patch: NotePatch) -> Result<(), Strin
     push!(patch.h, "h");
     push!(patch.file_id, "file_id");
     push!(patch.meta, "meta");
+    push!(patch.role, "role");
+    push!(patch.group_kind, "group_kind");
 
     if sets.is_empty() {
         return Ok(());
@@ -991,6 +1051,10 @@ pub struct EdgeOut {
     pub from_id: i64,
     pub to_kind: String,
     pub to_id: i64,
+    /// 关系类型：decompose 分解 / precede 先后 / evidence 依据 / produce 产出
+    pub kind: String,
+    /// 只对依据类有意义：0 必须遵守 / 1 可以参考 / 2 仅作背景
+    pub strength: i64,
 }
 
 #[tauri::command]
@@ -998,7 +1062,7 @@ pub fn list_edges(db: State<Db>, project_id: i64) -> Result<Vec<EdgeOut>, String
     let conn = db.0.lock().map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id,project_id,from_kind,from_id,to_kind,to_id
+            "SELECT id,project_id,from_kind,from_id,to_kind,to_id,kind,strength
              FROM board_edges WHERE project_id=?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -1011,6 +1075,8 @@ pub fn list_edges(db: State<Db>, project_id: i64) -> Result<Vec<EdgeOut>, String
                 from_id: r.get(3)?,
                 to_kind: r.get(4)?,
                 to_id: r.get(5)?,
+                kind: r.get::<_, Option<String>>(6)?.unwrap_or_else(|| "decompose".into()),
+                strength: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
             })
         })
         .map_err(map_err)?;
@@ -1025,6 +1091,7 @@ pub fn create_edge(
     from_id: i64,
     to_kind: String,
     to_id: i64,
+    kind: Option<String>,
 ) -> Result<i64, String> {
     if from_kind == to_kind && from_id == to_id {
         return Err("不能连接到自身".into());
@@ -1053,10 +1120,11 @@ pub fn create_edge(
             .map_err(map_err)?;
         return Ok(id);
     }
+    let kind = normalize_edge_kind(kind.as_deref());
     conn.execute(
-        "INSERT INTO board_edges(project_id,from_kind,from_id,to_kind,to_id)
-         VALUES(?1,?2,?3,?4,?5)",
-        params![project_id, from_kind, from_id, to_kind, to_id],
+        "INSERT INTO board_edges(project_id,from_kind,from_id,to_kind,to_id,kind,strength)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![project_id, from_kind, from_id, to_kind, to_id, kind, default_strength(&kind)],
     )
     .map_err(map_err)?;
     Ok(conn.last_insert_rowid())
@@ -2823,4 +2891,329 @@ mod tests {
         assert_eq!((cols, notes), (1, 1), "重复打开项目库不能把数据删掉");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // ---------- P0 数据层 ----------
+
+    fn cols_of(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn task_seqs(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT seq FROM tasks ORDER BY seq")
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// 迁移可以在同一个库上反复跑，且新表新列都在。
+    #[test]
+    fn migration_is_idempotent_and_adds_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        crate::db::init_db(&conn).unwrap();
+
+        let tcols = cols_of(&conn, "tasks");
+        assert!(tcols.iter().any(|c| c == "seq"), "tasks 缺 seq");
+
+        let ncols = cols_of(&conn, "board_notes");
+        assert!(ncols.iter().any(|c| c == "role"), "board_notes 缺 role");
+        assert!(
+            ncols.iter().any(|c| c == "group_kind"),
+            "board_notes 缺 group_kind"
+        );
+
+        let ecols = cols_of(&conn, "board_edges");
+        assert!(ecols.iter().any(|c| c == "kind"), "board_edges 缺 kind");
+        assert!(
+            ecols.iter().any(|c| c == "strength"),
+            "board_edges 缺 strength"
+        );
+
+        // 老数据（没写 kind）读出来应落到 decompose
+        conn.execute("INSERT INTO projects(name) VALUES('p')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO board_edges(project_id,from_kind,from_id,to_kind,to_id)
+             VALUES(?1,'task',1,'note',2)",
+            params![pid],
+        )
+        .unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM board_edges LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "decompose");
+    }
+
+    /// 补号只补没号的，从已有最大值往后接；反复调用不变。
+    #[test]
+    fn task_seq_backfill_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        conn.execute("INSERT INTO projects(name) VALUES('p')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO columns(project_id,name,sort_order) VALUES(?1,'待办',0)",
+            params![pid],
+        )
+        .unwrap();
+        let cid = conn.last_insert_rowid();
+        for t in ["甲", "乙", "丙"] {
+            conn.execute(
+                "INSERT INTO tasks(project_id,column_id,title) VALUES(?1,?2,?3)",
+                params![pid, cid, t],
+            )
+            .unwrap();
+        }
+
+        backfill_task_seq(&conn).unwrap();
+        assert_eq!(task_seqs(&conn), vec![1, 2, 3]);
+
+        // 再跑一次：没有待补的行，结果不变
+        backfill_task_seq(&conn).unwrap();
+        assert_eq!(task_seqs(&conn), vec![1, 2, 3]);
+
+        // 后来又多了一条没号的（老客户端写入），新号接在 4
+        conn.execute(
+            "INSERT INTO tasks(project_id,column_id,title) VALUES(?1,?2,'丁')",
+            params![pid, cid],
+        )
+        .unwrap();
+        backfill_task_seq(&conn).unwrap();
+        assert_eq!(task_seqs(&conn), vec![1, 2, 3, 4]);
+    }
+
+    /// 等级挂在关系上：同一份资料对两个任务可以是不同档，互不影响。
+    #[test]
+    fn task_ref_level_is_per_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        conn.execute("INSERT INTO projects(name) VALUES('p')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute("INSERT INTO columns(project_id,name) VALUES(?1,'待办')", params![pid])
+            .unwrap();
+        let cid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO tasks(project_id,column_id,title) VALUES(?1,?2,'A')",
+            params![pid, cid],
+        )
+        .unwrap();
+        let ta = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO tasks(project_id,column_id,title) VALUES(?1,?2,'B')",
+            params![pid, cid],
+        )
+        .unwrap();
+        let tb = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO board_notes(project_id,x,y,text) VALUES(?1,0,0,'资料')",
+            params![pid],
+        )
+        .unwrap();
+        let note = conn.last_insert_rowid();
+
+        let upsert = |task: i64, level: i64| {
+            conn.execute(
+                "INSERT INTO task_refs(project_id,task_id,note_id,level,ord)
+                 VALUES(?1,?2,?3,?4,0)
+                 ON CONFLICT(task_id,note_id) DO UPDATE SET level=excluded.level",
+                params![pid, task, note, level],
+            )
+            .unwrap();
+        };
+        // 对 A 是必须遵守，对 B 只是背景
+        upsert(ta, 0);
+        upsert(tb, 2);
+
+        let la: i64 = conn
+            .query_row(
+                "SELECT level FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![ta, note],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let lb: i64 = conn
+            .query_row(
+                "SELECT level FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![tb, note],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((la, lb), (0, 2));
+
+        // 改 A 的档位不能动到 B
+        upsert(ta, 1);
+        let la2: i64 = conn
+            .query_row(
+                "SELECT level FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![ta, note],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let lb2: i64 = conn
+            .query_row(
+                "SELECT level FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![tb, note],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((la2, lb2), (1, 2));
+
+        // 同一 (task,note) 只会有一行
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_refs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 2);
+
+        // 删任务时依据跟着走（外键 CASCADE）
+        conn.execute("DELETE FROM tasks WHERE id=?1", params![ta]).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_refs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1);
+    }
+}
+
+
+// ---------- 连线语义 ----------
+
+const EDGE_KINDS: [&str; 4] = ["decompose", "precede", "evidence", "produce"];
+
+fn normalize_edge_kind(kind: Option<&str>) -> String {
+    match kind {
+        Some(k) if EDGE_KINDS.contains(&k) => k.to_string(),
+        _ => "decompose".to_string(),
+    }
+}
+
+/// 依据类默认“可以参考”（1）；其余类型不用这个值。
+fn default_strength(kind: &str) -> i64 {
+    if kind == "evidence" {
+        1
+    } else {
+        0
+    }
+}
+
+/// 改一条连线的关系类型与等级。
+#[tauri::command]
+pub fn update_edge(
+    db: State<Db>,
+    id: i64,
+    kind: Option<String>,
+    strength: Option<i64>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    if let Some(k) = kind.as_deref() {
+        if !EDGE_KINDS.contains(&k) {
+            return Err(format!("未知的关系类型：{k}"));
+        }
+        conn.execute("UPDATE board_edges SET kind=?1 WHERE id=?2", params![k, id])
+            .map_err(map_err)?;
+    }
+    if let Some(v) = strength {
+        if !(0..=2).contains(&v) {
+            return Err("等级只能是 0、1、2".into());
+        }
+        conn.execute(
+            "UPDATE board_edges SET strength=?1 WHERE id=?2",
+            params![v, id],
+        )
+        .map_err(map_err)?;
+    }
+    Ok(())
+}
+
+// ---------- 任务用到的资料与等级 ----------
+
+#[derive(Serialize)]
+pub struct TaskRefOut {
+    pub id: i64,
+    pub task_id: i64,
+    pub note_id: i64,
+    /// 0 必须遵守 / 1 可以参考 / 2 仅作背景
+    pub level: i64,
+    pub ord: i64,
+}
+
+#[tauri::command]
+pub fn list_task_refs(db: State<Db>, project_id: i64) -> Result<Vec<TaskRefOut>, String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,task_id,note_id,level,ord FROM task_refs
+             WHERE project_id=?1 ORDER BY task_id, ord, id",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map(params![project_id], |r| {
+            Ok(TaskRefOut {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                note_id: r.get(2)?,
+                level: r.get(3)?,
+                ord: r.get(4)?,
+            })
+        })
+        .map_err(map_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
+}
+
+/// 给任务挂一份资料，或改它在这条关系上的等级。
+#[tauri::command]
+pub fn set_task_ref(
+    db: State<Db>,
+    project_id: i64,
+    task_id: i64,
+    note_id: i64,
+    level: Option<i64>,
+    ord: Option<i64>,
+) -> Result<i64, String> {
+    let lv = level.unwrap_or(1);
+    if !(0..=2).contains(&lv) {
+        return Err("等级只能是 0、1、2".into());
+    }
+    let conn = db.0.lock().map_err(map_err)?;
+    let next_ord: i64 = match ord {
+        Some(v) => v,
+        None => conn
+            .query_row(
+                "SELECT COALESCE(MAX(ord), -1) + 1 FROM task_refs WHERE task_id=?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?,
+    };
+    conn.execute(
+        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(task_id,note_id) DO UPDATE SET level=excluded.level, ord=excluded.ord",
+        params![project_id, task_id, note_id, lv, next_ord],
+    )
+    .map_err(map_err)?;
+    let id: i64 = conn
+        .query_row(
+            "SELECT id FROM task_refs WHERE task_id=?1 AND note_id=?2",
+            params![task_id, note_id],
+            |r| r.get(0),
+        )
+        .map_err(map_err)?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn delete_task_ref(db: State<Db>, task_id: i64, note_id: i64) -> Result<(), String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    conn.execute(
+        "DELETE FROM task_refs WHERE task_id=?1 AND note_id=?2",
+        params![task_id, note_id],
+    )
+    .map_err(map_err)?;
+    Ok(())
 }

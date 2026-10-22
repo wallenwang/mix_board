@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 350" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#6b7280}
+.h{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;fill:#1b212b;font-weight:600}
+</style>
+
+<text class="h" x="40" y="30">发散思考</text>
+<text class="s" x="40" y="50">一个中心，往四周长，没有终点</text>
+
+<line x1="150" y1="164" x2="150" y2="100" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="168.4" y1="171.6" x2="213.6" y2="126.4" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="176" y1="190" x2="240" y2="190" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="168.4" y1="208.4" x2="213.6" y2="253.6" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="150" y1="216" x2="150" y2="280" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="131.6" y1="208.4" x2="86.4" y2="253.6" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="124" y1="190" x2="60" y2="190" stroke="#b4b2a9" stroke-width="1"/>
+<line x1="131.6" y1="171.6" x2="86.4" y2="126.4" stroke="#b4b2a9" stroke-width="1"/>
+
+<circle cx="150" cy="100" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="213.6" cy="126.4" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="240" cy="190" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="213.6" cy="253.6" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="150" cy="280" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="86.4" cy="253.6" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="60" cy="190" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<circle cx="86.4" cy="126.4" r="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+
+<circle cx="150" cy="190" r="26" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<text class="t" x="150" y="190" text-anchor="middle" dominant-baseline="central">目标</text>
+
+<text class="h" x="380" y="30">收敛梳理</text>
+<text class="s" x="380" y="50">多个根汇入，收成一个果</text>
+
+<path d="M380,95 L620,175 L620,195 L380,265 Z" fill="#efece2" stroke="#c9c5b8" stroke-width="1"/>
+<line x1="380" y1="105" x2="618" y2="185" stroke="#b4b2a9" stroke-width="0.8"/>
+<line x1="380" y1="140" x2="618" y2="185" stroke="#b4b2a9" stroke-width="0.8"/>
+<line x1="380" y1="180" x2="618" y2="185" stroke="#b4b2a9" stroke-width="0.8"/>
+<line x1="380" y1="220" x2="618" y2="185" stroke="#b4b2a9" stroke-width="0.8"/>
+<line x1="380" y1="255" x2="618" y2="185" stroke="#b4b2a9" stroke-width="0.8"/>
+<circle cx="626" cy="185" r="8" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+
+<text class="s" x="40" y="330">越画越多，看不清哪里是头</text>
+<text class="s" x="380" y="330">每一条都通向同一个交付物</text>
+</svg>

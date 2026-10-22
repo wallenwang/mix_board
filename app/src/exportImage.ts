@@ -58,6 +58,10 @@ export interface ExportNode {
   subColor?: string;
   /** 文档卡片摘要 */
   summary?: string;
+  /** 任务编号（T1、T2…），画在标题前 */
+  seq?: number;
+  /** 这个任务用到的资料，画在卡片底部 */
+  refs?: { label: string; level: number }[];
 }
 
 export interface ExportLine {
@@ -71,6 +75,8 @@ export interface ExportLine {
   angle: number;
   color: string;
   width: number;
+  /** 关系类型：决定虚线样式，跟屏幕上的 CSS 一一对应 */
+  kind?: "decompose" | "precede" | "evidence" | "produce";
 }
 
 export interface ExportScene {
@@ -484,10 +490,38 @@ function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
     ctx.textAlign = "left";
     ctx.save();
     if (n.done) ctx.globalAlpha = 0.55;
+    // 首行先画编号徽标（屏幕上 .tn-seq），标题从它右边开始，
+    // 不画的话导出图里就没有 T1/T2，跟屏幕对不上。
+    let titleX = x + 13;
+    let titleW = innerW;
+    if (n.seq) {
+      const bFont = `700 ${Math.max(9, Math.round(fs * 0.77))}px ${font}`;
+      const label = `T${n.seq}`;
+      ctx.font = bFont;
+      const bw = ctx.measureText(label).width + 8;
+      const bh = Math.round(fs * 1.15);
+      const by = y + padT + halfLead + Math.max(0, (lh - bh) / 2);
+      ctx.save();
+      if (n.done) ctx.globalAlpha = 0.55;
+      ctx.fillStyle = "rgb(0 0 0 / 6%)";
+      roundRect(ctx, titleX, by, bw, bh, 4);
+      ctx.fill();
+      ctx.fillStyle = n.subColor || color;
+      ctx.globalAlpha *= 0.78;
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, titleX + 4, by + bh / 2 + 0.5);
+      ctx.restore();
+      ctx.textBaseline = "top";
+      titleX += bw + 5;
+      titleW = Math.max(20, innerW - (bw + 5));
+    }
+
     ctx.fillStyle = color;
     ctx.font = `600 ${Math.max(12, fs)}px ${font}`;
-    const tl = wrapText(ctx, n.title, innerW).slice(0, 3);
-    tl.forEach((l, i) => ctx.fillText(l, x + 13, y + padT + halfLead + i * lh));
+    const tl = wrapText(ctx, n.title, titleW).slice(0, 3);
+    tl.forEach((l, i) =>
+      ctx.fillText(l, i === 0 ? titleX : x + 13, y + padT + halfLead + i * lh)
+    );
 
     let cursorY = y + padT + tl.length * lh + 3 + halfLead;
     const sub = (n.sub || []).filter(Boolean);
@@ -504,6 +538,45 @@ function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
       ctx.font = `${Math.max(11, fs - 2)}px ${font}`;
       const bl = wrapText(ctx, n.body, innerW).slice(0, 2);
       bl.forEach((l, i) => ctx.fillText(l, x + 13, cursorY + 3 + i * (fs + 4)));
+      cursorY += 3 + bl.length * (fs + 4);
+    }
+
+    // 依据 chip：三档用明暗区分（实心 / 描边 / 虚线灰字），与卡片上的样式一致
+    if (n.refs && n.refs.length) {
+      const cFont = `${Math.max(9, Math.round(fs * 0.77))}px ${font}`;
+      const chH = Math.round(fs * 1.3);
+      const cy = cursorY + 4;
+      let cx = x + 13;
+      ctx.font = cFont;
+      ctx.textBaseline = "middle";
+      for (const r of n.refs) {
+        const label = r.label || "资料";
+        const tw = ctx.measureText(label).width + 10;
+        if (cx + tw > x + w - 10) break;
+        ctx.save();
+        if (n.done) ctx.globalAlpha = 0.5;
+        if (r.level === 0) {
+          ctx.fillStyle = "#6f7680";
+          roundRect(ctx, cx, cy, tw, chH, 4);
+          ctx.fill();
+          ctx.fillStyle = "#ffffff";
+        } else {
+          ctx.fillStyle = "#ffffff";
+          roundRect(ctx, cx, cy, tw, chH, 4);
+          ctx.fill();
+          if (r.level === 2) ctx.setLineDash([3, 3]);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = "#d5d8dc";
+          roundRect(ctx, cx, cy, tw, chH, 4);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = r.level === 2 ? "#9aa0a6" : color;
+        }
+        ctx.fillText(label, cx + 5, cy + chH / 2 + 0.5);
+        ctx.restore();
+        cx += tw + 4;
+      }
+      ctx.textBaseline = "top";
     }
     ctx.restore();
     ctx.restore();
@@ -564,8 +637,11 @@ export function renderScene(scene: ExportScene, scale = 2, pad = 60): HTMLCanvas
   for (const l of scene.lines) {
     ctx.strokeStyle = l.color;
     ctx.lineWidth = l.width;
+    // 依据用点线，其余实线 —— 屏幕上的 .edge-line.k-* 是同一条规则
+    ctx.setLineDash(l.kind === "evidence" ? [1, 5] : []);
     ctx.stroke(new Path2D(l.d));
   }
+  ctx.setLineDash([]);
   // 箭头单独一轮画，避免被后画的连线盖住
   for (const l of scene.lines) drawArrow(ctx, l.x2, l.y2, l.angle, l.color);
 

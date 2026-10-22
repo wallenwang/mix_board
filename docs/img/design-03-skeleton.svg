@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 286" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#6b7280}
+.h{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b;font-weight:600}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="s" x="40" y="26">资料永不进树，只挂在最左侧；垂直方向固定四层</text>
+
+<text class="s" x="40" y="52">资料（源头）</text>
+<text class="s" x="175" y="52">任务</text>
+<text class="s" x="310" y="52">子任务</text>
+<text class="s" x="445" y="52">阶段</text>
+<text class="s" x="560" y="52">交付（终点）</text>
+
+<rect x="40" y="64" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="96" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="128" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="160" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="192" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<rect x="40" y="224" width="100" height="26" rx="6" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+<text class="t" x="90" y="77" text-anchor="middle" dominant-baseline="central">D1 品牌手册</text>
+<text class="t" x="90" y="109" text-anchor="middle" dominant-baseline="central">D2 竞品调研</text>
+<text class="t" x="90" y="141" text-anchor="middle" dominant-baseline="central">D3 釉色参考</text>
+<text class="t" x="90" y="173" text-anchor="middle" dominant-baseline="central">D4 包装趋势</text>
+<text class="t" x="90" y="205" text-anchor="middle" dominant-baseline="central">D5 摄影素材</text>
+<text class="t" x="90" y="237" text-anchor="middle" dominant-baseline="central">D6 行业报告</text>
+
+<path d="M140,77 C158,77 158,102 173,102" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+<path d="M140,109 C158,109 158,102 173,102" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+<path d="M140,141 C158,141 158,162 173,162" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+<path d="M140,173 C158,173 158,162 173,162" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+<path d="M140,205 C158,205 158,222 173,222" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+<path d="M140,237 C158,237 158,222 173,222" fill="none" stroke="#b4b2a9" stroke-width="0.8"/>
+
+<rect x="175" y="84" width="100" height="36" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="175" y="144" width="100" height="36" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="175" y="204" width="100" height="36" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="310" y="114" width="100" height="36" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="310" y="194" width="100" height="36" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="445" y="152" width="100" height="40" rx="7" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+<rect x="568" y="150" width="92" height="44" rx="7" fill="#e8e4d9" stroke="#6b7280" stroke-width="1"/>
+<text class="h" x="225" y="102" text-anchor="middle" dominant-baseline="central">任务 1 定调</text>
+<text class="h" x="225" y="162" text-anchor="middle" dominant-baseline="central">任务 2 配色</text>
+<text class="h" x="225" y="222" text-anchor="middle" dominant-baseline="central">任务 3 版式</text>
+<text class="t" x="360" y="132" text-anchor="middle" dominant-baseline="central">子任务 甲</text>
+<text class="t" x="360" y="212" text-anchor="middle" dominant-baseline="central">子任务 乙</text>
+<text class="h" x="495" y="172" text-anchor="middle" dominant-baseline="central">任务 B 提案</text>
+<text class="h" x="614" y="172" text-anchor="middle" dominant-baseline="central">汇报文稿</text>
+
+<path d="M275,96 C292,96 292,122 308,124" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M275,168 C292,168 292,140 308,138" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M275,222 C292,222 292,206 308,204" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M410,132 C427,132 427,166 443,169" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M410,212 C427,212 427,182 443,179" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M545,172 L566,172" fill="none" stroke="#0f6e56" stroke-width="1.4" marker-end="url(#a)"/>
+
+<text class="s" x="40" y="278">思考时从左往右摊开 · 梳理时从右往左倒推 · 执行时从左往右推进</text>
+</svg>

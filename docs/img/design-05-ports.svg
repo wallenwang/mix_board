@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 306" width="100%">
+<style>
+.t{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;fill:#1b212b}
+.s{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;fill:#6b7280}
+.h{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;fill:#1b212b;font-weight:600}
+</style>
+<defs>
+<marker id="g" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="s" x="40" y="26">端口只在鼠标悬停时出现；四个方位各有固定含义</text>
+
+<rect x="250" y="140" width="180" height="70" rx="10" fill="#faeeda" stroke="#854f0b" stroke-width="1.2"/>
+<text class="h" x="340" y="168" text-anchor="middle" dominant-baseline="central">任务 A</text>
+<text class="s" x="340" y="190" text-anchor="middle" dominant-baseline="central">悬停才显示端口</text>
+
+<path d="M172,175 L244,175" fill="none" stroke="#0f6e56" stroke-width="1.6"/>
+<text class="t" x="162" y="168" text-anchor="end">输入</text>
+<text class="s" x="162" y="186" text-anchor="end">资料 / 前序任务</text>
+
+<path d="M436,175 L508,175" fill="none" stroke="#0f6e56" stroke-width="1.6"/>
+<text class="t" x="518" y="168">输出</text>
+<text class="s" x="518" y="186">后续任务</text>
+
+<path d="M340,82 L340,136" fill="none" stroke="#854f0b" stroke-width="1.6"/>
+<text class="t" x="352" y="74">父任务</text>
+
+<path d="M340,214 L340,268" fill="none" stroke="#854f0b" stroke-width="1.6"/>
+<text class="t" x="352" y="278">子任务</text>
+
+<circle cx="250" cy="175" r="5" fill="#ffffff" stroke="#0f6e56" stroke-width="1.6"/>
+<circle cx="430" cy="175" r="5" fill="#ffffff" stroke="#0f6e56" stroke-width="1.6"/>
+<circle cx="340" cy="140" r="5" fill="#ffffff" stroke="#854f0b" stroke-width="1.6"/>
+<circle cx="340" cy="210" r="5" fill="#ffffff" stroke="#854f0b" stroke-width="1.6"/>
+
+<text class="s" x="512" y="252">横向连（左右）：一条流水线</text>
+<text class="s" x="512" y="272">纵向连（上下）：一层层级</text>
+
+<text class="s" x="40" y="298">连的对象决定关系类型：连资料 → 依据；连任务 → 先后。所以永远不需要选菜单。</text>
+</svg>
