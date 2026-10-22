@@ -58,6 +58,8 @@ export interface ExportNode {
   subColor?: string;
   /** 文档卡片摘要 */
   summary?: string;
+  /** 分组框的约束强度（strong/ref/bg）；空 = 没标 */
+  cluster?: "strong" | "ref" | "bg" | null;
   /** 任务编号（1、2.1…），画在标题前 */
   seq?: string;
   /** 这个任务用到的资料，画在卡片底部 */
@@ -86,6 +88,13 @@ export interface ExportScene {
   /** 画布底色（默认取 --bg） */
   bg?: string;
 }
+
+/** 分组框强度胶囊：跟 Whiteboard.vue 里 CLUSTER_META 的颜色保持一致 */
+const CLUSTER_STYLE: Record<string, { label: string; color: string }> = {
+  strong: { label: "强依据", color: "#d9822b" },
+  ref: { label: "参考", color: "#3b7ddd" },
+  bg: { label: "背景", color: "#98a2b6" },
+};
 
 const FONT = '"Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif';
 const MONO = 'Consolas, "Courier New", monospace';
@@ -355,6 +364,28 @@ function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
     ctx.fillText(label, x + 24, y - 12 + barH / 2);
+
+    // 强度胶囊：屏幕上是 .box-cluster，贴右端；导出图里也得有，不然两张对不上
+    if (n.cluster) {
+      const ci = CLUSTER_STYLE[n.cluster];
+      const pfs = Math.max(10, fs - 2);
+      ctx.font = `600 ${pfs}px ${font}`;
+      const pw = ctx.measureText(ci.label).width + 16;
+      const ph = pfs + 8;
+      const px = x + w - 12 - pw;
+      const py = y - 12 + (barH - ph) / 2;
+      // 白底 + 彩边 + 彩字，跟屏幕上的 .box-cluster 一致
+      ctx.fillStyle = "#ffffff";
+      roundRect(ctx, px, py, pw, ph, ph / 2);
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = ci.color;
+      roundRect(ctx, px, py, pw, ph, ph / 2);
+      ctx.stroke();
+      ctx.fillStyle = ci.color;
+      ctx.textAlign = "center";
+      ctx.fillText(ci.label, px + pw / 2, y - 12 + barH / 2);
+    }
     ctx.restore();
     return;
   }

@@ -228,6 +228,8 @@ function startMarquee(e: MouseEvent) {
         hits.push(keyOf("task", t.id));
     }
     for (const n of store.notes) {
+      // 分组框本身不进选择集：否则「多选后成组」会把框套进框
+      if (n.kind === "box") continue;
       const p = posOf("note", n.id);
       const s = noteSize(n);
       if (p.x < x1 && p.x + s.w > x0 && p.y < y1 && p.y + s.h > y0)
@@ -261,11 +263,14 @@ function bgDown(e: MouseEvent) {
     startPan(e);
     return;
   }
+  if (tool.value === "box") {
+    startDrawBox(e);
+    return;
+  }
   if (
     tool.value === "note" ||
     tool.value === "text" ||
     tool.value === "mind" ||
-    tool.value === "box" ||
     tool.value === "task"
   ) {
     void createAtPointer(e);
@@ -1072,6 +1077,254 @@ async function cycleRadius(n: BoardNote) {
   await patchLook(n, { radius: next });
 }
 
+/* ------------------------------------------------------------------
+ * 分组框的约束强度：强依据 / 参考 / 背景
+ *
+ * 它回答的是「这一批材料整体有多硬」，跟任务卡上那一排资料等级不是一回事：
+ * 任务卡上的等级挂在 task_refs 这条关系上（同一份资料对不同任务可以不同档），
+ * 分组框的强度只表示这一堆东西的性质，作用是
+ *   a) 画布上一眼看出哪块是硬材料；
+ *   b) 从框里拖资料到任务时，给那条依据一个合适的默认等级。
+ *
+ * 存在 meta.cluster 里，跟 meta.look 用同一个 JSON 字段，不加数据库列。
+ * ------------------------------------------------------------------ */
+type ClusterStrength = "strong" | "ref" | "bg";
+const CLUSTER_META: {
+  v: ClusterStrength;
+  label: string;
+  short: string;
+  hint: string;
+  color: string;
+}[] = [
+  {
+    v: "strong",
+    label: "强依据",
+    short: "冲突时以它为准",
+    hint: "强依据：这一组是硬材料，结论有冲突时以它为准",
+    color: "#D9822B",
+  },
+  {
+    v: "ref",
+    label: "参考",
+    short: "没冲突时补充",
+    hint: "参考：有启发但不强制，没有冲突时补充进来",
+    color: "#3B7DDD",
+  },
+  {
+    v: "bg",
+    label: "背景",
+    short: "只交代语境",
+    hint: "背景：只用来了解语境，不要当依据引用",
+    color: "#98A2B6",
+  },
+];
+/** 强度 → 依据默认等级（0 必须遵守 / 1 可以参考 / 2 仅作背景） */
+const CLUSTER_LEVEL: Record<ClusterStrength, number> = { strong: 0, ref: 1, bg: 2 };
+const CLUSTER_MAP = new Map(CLUSTER_META.map((m) => [m.v, m]));
+
+function metaField(n: BoardNote): Record<string, unknown> {
+  try {
+    return JSON.parse(n.meta || "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function strengthOf(n: BoardNote | undefined): ClusterStrength | null {
+  if (!n || n.kind !== "box") return null;
+  const v = metaField(n).cluster;
+  return v === "strong" || v === "ref" || v === "bg" ? (v as ClusterStrength) : null;
+}
+
+/** 写强度：同时把框的边框/标题色换成该档的标准色，一眼能分辨。之后仍可手动改色。 */
+async function setStrength(n: BoardNote, v: ClusterStrength) {
+  const m = metaField(n);
+  m.cluster = v;
+  const meta = JSON.stringify(m);
+  const color = CLUSTER_MAP.get(v)?.color ?? n.color;
+  try {
+    await api.updateNote(n.id, { meta, color });
+    await store.refreshBoard();
+  } catch (e) {
+    reportError("设置约束强度", e);
+  }
+}
+
+/** 点一下在 未标注 → 强依据 → 参考 → 背景 → 未标注 之间循环 */
+async function cycleStrength(n: BoardNote) {
+  const order: (ClusterStrength | null)[] = [null, "strong", "ref", "bg"];
+  const cur = strengthOf(n);
+  const i = order.findIndex((x) => x === cur);
+  const next = order[(i + 1) % order.length];
+  if (next == null) {
+    const m = metaField(n);
+    delete m.cluster;
+    try {
+      await api.updateNote(n.id, { meta: JSON.stringify(m) });
+      await store.refreshBoard();
+    } catch (e) {
+      reportError("清除约束强度", e);
+    }
+    return;
+  }
+  await setStrength(n, next);
+}
+
+/** 这个节点被哪个分组框收着：取面积最小的那个（套框时算最里面一层） */
+function boxOf(kind: "task" | "note", id: number): BoardNote | null {
+  let best: BoardNote | null = null;
+  let bestArea = Infinity;
+  for (const b of store.notes) {
+    if (b.kind !== "box") continue;
+    if (!centerInBox(b, kind, id)) continue;
+    const sz = noteSize(b);
+    const area = sz.w * sz.h;
+    if (area < bestArea) {
+      bestArea = area;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/** 资料所在分组的强度；没有框或没标注就是 null（拖线时按 1 参考处理） */
+function clusterOfNote(n: BoardNote): ClusterStrength | null {
+  const b = boxOf("note", n.id);
+  return strengthOf(b);
+}
+
+/** 选中集合里除分组框之外的节点 —— 成组只看这些 */
+function groupableKeys(): string[] {
+  return selectedKeys.value.filter((k) => {
+    const { kind, id } = parseKey(k);
+    if (kind !== "note") return true;
+    return noteById(id)?.kind !== "box";
+  });
+}
+
+/* ------------------------------------------------------------------
+ * 拖出一个分组框
+ *
+ * 两件事一起做：拖出范围 = 按这个范围建框；点一下没拖 = 放一个默认大小的
+ * （原来「点一下放一个」的习惯保留，不打断肌肉记忆）。
+ * ------------------------------------------------------------------ */
+const boxDraft = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+const boxDraftStyle = computed(() => {
+  const d = boxDraft.value;
+  if (!d) return {};
+  const x = Math.min(d.x0, d.x1) * zoom.value + panX.value;
+  const y = Math.min(d.y0, d.y1) * zoom.value + panY.value;
+  return {
+    left: x + "px",
+    top: y + "px",
+    width: Math.abs(d.x1 - d.x0) * zoom.value + "px",
+    height: Math.abs(d.y1 - d.y0) * zoom.value + "px",
+  };
+});
+
+/** 按世界坐标矩形建一个框；太小的当"点一下"，用默认尺寸 */
+async function createBoxInRect(x0: number, y0: number, x1: number, y1: number) {
+  const left = Math.min(x0, x1);
+  const top = Math.min(y0, y1);
+  const w = Math.abs(x1 - x0);
+  const h = Math.abs(y1 - y0);
+  const small = w < 80 || h < 60;
+  const id = await createNode("box", small ? left - 40 : left, small ? top - 20 : top);
+  if (id == null) return;
+  if (!small) {
+    try {
+      await api.updateNote(id, { w: Math.round(w), h: Math.round(h) });
+      await store.refreshBoard();
+    } catch (e) {
+      reportError("调整分组框大小", e);
+    }
+  }
+  const n = noteById(id);
+  if (small && n) await startEditNote(n);
+}
+
+function startDrawBox(e: MouseEvent) {
+  const startW = screenToWorld(e.clientX, e.clientY);
+  let moved = false;
+  const move = (ev: MouseEvent) => {
+    const w = screenToWorld(ev.clientX, ev.clientY);
+    if (!moved && Math.hypot(w.x - startW.x, w.y - startW.y) * zoom.value < 5) return;
+    moved = true;
+    boxDraft.value = { x0: startW.x, y0: startW.y, x1: w.x, y1: w.y };
+  };
+  const up = (ev: MouseEvent) => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    const d = boxDraft.value;
+    boxDraft.value = null;
+    const w = screenToWorld(ev.clientX, ev.clientY);
+    if (!moved || !d) {
+      void createBoxInRect(startW.x, startW.y, startW.x, startW.y);
+    } else {
+      void createBoxInRect(d.x0, d.y0, d.x1, d.y1);
+    }
+    if (!ev.shiftKey) tool.value = "select";
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+}
+
+/**
+ * 把选中的卡片一次装进分组框。
+ *
+ * 成因不看框内有什么，只看选中了什么：包围盒 + 一圈留白就是新框的大小，
+ * 框建好后成员关系仍由「中心点落在框内」自动算出，不需要写成员表。
+ */
+async function groupSelection() {
+  const keys = groupableKeys();
+  if (keys.length < 2) {
+    ElMessage.info("先选中至少两张卡片（Ctrl 点选或直接框选），再点分组");
+    return;
+  }
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const k of keys) {
+    const { kind, id } = parseKey(k);
+    const p = posOf(kind, id);
+    const sz = sizeAt(kind, id);
+    if (!sz.w || !sz.h) continue;
+    x0 = Math.min(x0, p.x);
+    y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x + sz.w);
+    y1 = Math.max(y1, p.y + sz.h);
+  }
+  if (!Number.isFinite(x0)) return;
+  const pad = 34;
+  const keep = [...selectedKeys.value];
+  const id = await createNode("box", x0 - pad, y0 - pad - 12);
+  if (id == null) return;
+  try {
+    await api.updateNote(id, {
+      w: Math.round(x1 - x0 + pad * 2),
+      h: Math.round(y1 - y0 + pad * 2 + 12),
+    });
+    await store.refreshBoard();
+  } catch (e) {
+    reportError("调整分组框大小", e);
+  }
+  // createNode 会把选中改成新建的框，这里把原来的选择还回去
+  selectedKeys.value = keep;
+  ElMessage.success(`已把 ${keys.length} 张卡片装进分组框，框角可以点「强度」标一下`);
+}
+
+/** 工具栏那个「分组框」按钮：有选中就直接成组，没选中才进入画框模式 */
+async function onBoxTool() {
+  if (groupableKeys().length >= 2) {
+    await groupSelection();
+    return;
+  }
+  tool.value = "box";
+  ElMessage.info("拖出一个范围就是分组框；直接点一下则放一个默认大小的");
+}
+
 function startResizeNode(e: PointerEvent, n: BoardNote) {
   e.preventDefault();
   e.stopPropagation();
@@ -1386,8 +1639,16 @@ async function connect(
     }
     await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
     if (autoKind === "evidence") {
-      // 默认「可以参考」，任务卡上点一下就换档
-      await api.setTaskRef(store.currentProjectId, to.id, from.id, 1);
+      // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、背景→仅作背景。
+      // 没放进任何分组（或框上没标强度）就按「可以参考」。任务卡上仍可随时改档。
+      const src = noteById(from.id);
+      const st = src ? clusterOfNote(src) : null;
+      await api.setTaskRef(
+        store.currentProjectId,
+        to.id,
+        from.id,
+        st ? CLUSTER_LEVEL[st] : 1
+      );
     }
     await store.refreshBoard();
     if (autoKind === "evidence") {
@@ -2820,6 +3081,8 @@ async function buildScene() {
       h: size.h,
       title: k === "file" ? labelOf(n) : n.text,
       color: n.color,
+      // 分组框的强度标签要跟着进导出图，否则图和屏幕差一块
+      cluster: k === "box" ? strengthOf(n) : null,
       style: domStyle("note", n.id, k),
     };
     if (k === "mind") node.shape = lookOf(n).shape === "circle" ? "circle" : "capsule";
@@ -3449,6 +3712,12 @@ function onKey(e: KeyboardEvent) {
     tool.value = "select";
     return;
   }
+  // Ctrl+G = 把选中的几张卡片装进一个分组框
+  if (ctrl && e.key.toLowerCase() === "g") {
+    e.preventDefault();
+    void groupSelection();
+    return;
+  }
   if (!sel) return;
 
   // Tab = 下一级（子任务 / 导图分支）
@@ -3601,8 +3870,8 @@ const numOf = (t: Task) => store.numberOf(t.id);
         <button
           class="tb ico"
           :class="{ on: tool === 'box' }"
-          title="分组框：把相关卡片圈在一起"
-          @click="tool = 'box'"
+          title="分组框：拖出一个范围就建框；已经选中多张卡片时点它 = 直接装进一个框（Ctrl+G）"
+          @click="onBoxTool"
         >
           <AppIcon name="box" :size="17" />
         </button>
@@ -3766,6 +4035,9 @@ const numOf = (t: Task) => store.numberOf(t.id);
       <template v-if="tool === 'link'"
         >连线模式：先点【上级】卡片，再点它的【下级】。也可以直接拖卡片两端的圆点来连线。</template
       >
+      <template v-else-if="tool === 'box'"
+        >分组框：按住左键拖出一个范围，松开就成框；直接点一下则放一个默认大小的</template
+      >
       <template v-else>在空白处点一下就能放下（按住 Shift 连续放）</template>
       <button class="wb-mode-x" @click="tool = 'select'">✕</button>
     </div>
@@ -3823,6 +4095,10 @@ const numOf = (t: Task) => store.numberOf(t.id);
     <div class="wb-content" :style="contentStyle">
       <!-- 框选矩形 -->
       <div v-if="marquee" class="wb-marquee" :style="marqueeStyle"></div>
+      <!-- 拖出一个分组框时，先给一块虚线预览，松开才真正建 -->
+      <div v-if="boxDraft" class="wb-boxdraft" :style="boxDraftStyle">
+        <span>松开就建成分组框</span>
+      </div>
 
       <!-- 分组框在最底层 -->
       <div
@@ -3861,6 +4137,24 @@ const numOf = (t: Task) => store.numberOf(t.id);
           </template>
           <template v-else>{{ n.text || "分组" }}</template>
         </div>
+        <button
+          class="box-cluster"
+          :class="strengthOf(n) ? 'cs-' + strengthOf(n) : 'cs-none'"
+          :title="
+            strengthOf(n)
+              ? CLUSTER_MAP.get(strengthOf(n) as ClusterStrength)?.hint +
+                '（点一下换下一档；从框里拖资料到任务时，默认就按这一档）'
+              : '给这个分组标一下约束强度：强依据 / 参考 / 背景'
+          "
+          @pointerdown.stop
+          @click.stop="cycleStrength(n)"
+        >
+          {{
+            strengthOf(n)
+              ? CLUSTER_MAP.get(strengthOf(n) as ClusterStrength)?.label
+              : "标强度"
+          }}
+        </button>
         <div class="node-tools">
           <button title="加下一级（Tab）" @pointerdown.stop @click.stop="addChildNote(n.id)">
             ＋子
@@ -5554,11 +5848,90 @@ const numOf = (t: Task) => store.numberOf(t.id);
   font-size: 12px;
   font-weight: 600;
   color: var(--ink, #fff);
-  max-width: 80%;
+  /* 右边要给强度标签留位，否则长标题会压到标签上 */
+  max-width: calc(100% - 92px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 强度标签：贴在标题条右侧，颜色即语义；没标注时是灰色虚边的「标强度」 */
+/* 强度标签做成「白底彩字」的徽章：标题条本身就是框色，
+   标签再用同色实底会分不清「名字」和「等级」 */
+.box-cluster {
+  position: absolute;
+  top: -12px;
+  right: 12px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+}
+.box-cluster.cs-strong {
+  color: #c1701f;
+  border-color: #d9822b;
+}
+.box-cluster.cs-ref {
+  color: #2f6ac4;
+  border-color: #3b7ddd;
+}
+.box-cluster.cs-bg {
+  color: #78828f;
+  border-color: #98a2b6;
+}
+html.dark .box-cluster.cs-strong {
+  color: #e9a35c;
+}
+html.dark .box-cluster.cs-ref {
+  color: #8db2f2;
+}
+html.dark .box-cluster.cs-bg {
+  color: #a8b2c0;
+}
+.box-cluster.cs-none {
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px dashed var(--hairline-strong, var(--hairline));
+  font-weight: 500;
+  /* 没标强度的框不打扰视线，悬停或选中时才露出「标强度」 */
+  opacity: 0;
+  transition: opacity 0.15s var(--ease-out);
+}
+.wb-node:hover .box-cluster.cs-none,
+.wb-node.sel .box-cluster.cs-none {
+  opacity: 1;
+}
+.box-cluster.cs-none:hover {
+  color: var(--text-subtle);
+  border-color: var(--text-faint);
+}
+
+/* 拖出分组框时的预览：比框选矩形更像"即将生成的框" */
+.wb-boxdraft {
+  position: absolute;
+  z-index: 3;
+  border: 1.5px dashed var(--brand-2, #b8763f);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--brand-2, #b8763f) 7%, transparent);
+  pointer-events: none;
+}
+.wb-boxdraft span {
+  position: absolute;
+  top: -11px;
+  left: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--brand-2, #b8763f);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
 .box-input {
   border: none;
   background: transparent;
@@ -5578,6 +5951,13 @@ const numOf = (t: Task) => store.numberOf(t.id);
 /* 只有色板展开时才临时抬起来，不然色块会被框里的卡片压住点不到 */
 .box-node.pal-open {
   z-index: 7;
+}
+/* 分组框的操作按钮放到底部右边：顶部要留给「标题 + 强度标签」，
+   否则一悬停就被工具条盖住，强度标签点不到 */
+.box-node .node-tools {
+  top: auto;
+  bottom: 10px;
+  right: 16px;
 }
 
 /* ---- 白板浮动菜单（右键图片 / 从端口拖到空白处） ---- */
