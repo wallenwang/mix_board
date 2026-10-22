@@ -497,14 +497,18 @@ const apiImpl = {
     taskId: number,
     noteId: number,
     level?: number,
-    ord?: number
+    ord?: number,
+    point?: string
   ) {
-    log("set_task_ref", { projectId, taskId, noteId, level, ord });
+    log("set_task_ref", { projectId, taskId, noteId, level, ord, point });
     const lv = level ?? 1;
+    const pt = (point ?? "").trim().slice(0, 2000);
     const old = taskRefs.find((r) => r.task_id === taskId && r.note_id === noteId);
     if (old) {
       old.level = lv as any;
       if (ord !== undefined) old.ord = ord;
+      // 传了才覆盖：跟后端一致，换档不该清掉要点
+      if (point !== undefined) old.point = pt;
       return old.id;
     }
     const nextOrd =
@@ -516,6 +520,7 @@ const apiImpl = {
       note_id: noteId,
       level: lv as any,
       ord: nextOrd,
+      point: pt,
     };
     taskRefs.push(ref);
     return ref.id;

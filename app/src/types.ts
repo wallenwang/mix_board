@@ -96,6 +96,13 @@ export interface TaskRef {
   note_id: number;
   level: RefLevel;
   ord: number;
+  /**
+   * 这条依据对「这个任务」的要点，一句话。
+   *
+   * AI 读不到本地文件，只给文件名它不知道里面写了什么；这句是唯一能把
+   * 材料内容传进去的位置。同一份资料对不同任务可以摘不同的话。
+   */
+  point: string;
 }
 
 /** 白板上传的资料（文件实体在应用数据目录 assets/ 下） */

@@ -3078,6 +3078,80 @@ mod tests {
             .unwrap();
         assert_eq!(left, 1);
     }
+
+    /// 要点是「换档不清空、显式传空才清空」。
+    ///
+    /// 点标签改档位是最常见的操作；如果换档顺手把要点清了，
+    /// 用户写过的内容会莫名其妙消失，而且看不出来是什么时候丢的。
+    #[test]
+    fn task_ref_point_survives_level_change() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        conn.execute("INSERT INTO projects(name) VALUES('p')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO board_notes(project_id,x,y,text) VALUES(?1,0,0,'资料')",
+            params![pid],
+        )
+        .unwrap();
+        let note = conn.last_insert_rowid();
+        // task_refs 对 tasks 有外键，先建一个真任务
+        conn.execute("INSERT INTO columns(project_id,name) VALUES(?1,'待办')", params![pid])
+            .unwrap();
+        let cid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO tasks(project_id,column_id,title) VALUES(?1,?2,'A')",
+            params![pid, cid],
+        )
+        .unwrap();
+        let task = conn.last_insert_rowid();
+
+        // 写要点
+        conn.execute(
+            "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+             VALUES(?1,?2,?3,1,0,'主色限墨绿')
+             ON CONFLICT(task_id,note_id)
+             DO UPDATE SET level=excluded.level, point=excluded.point",
+            params![pid, task, note],
+        )
+        .unwrap();
+
+        // 只换档（模拟 set_task_ref 传 point=None 的那条 SQL）
+        conn.execute(
+            "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+             VALUES(?1,?2,?3,0,0,'')
+             ON CONFLICT(task_id,note_id) DO UPDATE SET level=excluded.level",
+            params![pid, task, note],
+        )
+        .unwrap();
+        let (lv, pt): (i64, String) = conn
+            .query_row(
+                "SELECT level, point FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![task, note],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(lv, 0, "档位应当已改成必须遵守");
+        assert_eq!(pt, "主色限墨绿", "换档不该清掉要点");
+
+        // 显式传空串：这是主动清空
+        conn.execute(
+            "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+             VALUES(?1,?2,?3,0,0,'')
+             ON CONFLICT(task_id,note_id)
+             DO UPDATE SET level=excluded.level, point=excluded.point",
+            params![pid, task, note],
+        )
+        .unwrap();
+        let pt2: String = conn
+            .query_row(
+                "SELECT point FROM task_refs WHERE task_id=?1 AND note_id=?2",
+                params![task, note],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pt2, "", "显式传空应当清空");
+    }
 }
 
 
@@ -3140,6 +3214,8 @@ pub struct TaskRefOut {
     /// 0 必须遵守 / 1 可以参考 / 2 仅作背景
     pub level: i64,
     pub ord: i64,
+    /// 这条依据对这个任务的要点（一句话，可为空）
+    pub point: String,
 }
 
 #[tauri::command]
@@ -3147,7 +3223,7 @@ pub fn list_task_refs(db: State<Db>, project_id: i64) -> Result<Vec<TaskRefOut>,
     let conn = db.0.lock().map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id,task_id,note_id,level,ord FROM task_refs
+            "SELECT id,task_id,note_id,level,ord,point FROM task_refs
              WHERE project_id=?1 ORDER BY task_id, ord, id",
         )
         .map_err(map_err)?;
@@ -3159,13 +3235,16 @@ pub fn list_task_refs(db: State<Db>, project_id: i64) -> Result<Vec<TaskRefOut>,
                 note_id: r.get(2)?,
                 level: r.get(3)?,
                 ord: r.get(4)?,
+                point: r.get(5)?,
             })
         })
         .map_err(map_err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
 }
 
-/// 给任务挂一份资料，或改它在这条关系上的等级。
+/// 给任务挂一份资料，或改它在这条关系上的等级 / 要点。
+///
+/// point 为 None 表示"这次不动要点"：改档位时不会顺手把已写的要点清空。
 #[tauri::command]
 pub fn set_task_ref(
     db: State<Db>,
@@ -3174,11 +3253,17 @@ pub fn set_task_ref(
     note_id: i64,
     level: Option<i64>,
     ord: Option<i64>,
+    point: Option<String>,
 ) -> Result<i64, String> {
     let lv = level.unwrap_or(1);
     if !(0..=2).contains(&lv) {
         return Err("等级只能是 0、1、2".into());
     }
+    // 要点是给 AI 读的一句话，太长反而会被截断忽略，这里兜个上限
+    let pt: String = point
+        .as_deref()
+        .map(|v| v.trim().chars().take(2000).collect())
+        .unwrap_or_default();
     let conn = db.0.lock().map_err(map_err)?;
     let next_ord: i64 = match ord {
         Some(v) => v,
@@ -3190,13 +3275,20 @@ pub fn set_task_ref(
             )
             .map_err(map_err)?,
     };
-    conn.execute(
-        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord)
-         VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(task_id,note_id) DO UPDATE SET level=excluded.level, ord=excluded.ord",
-        params![project_id, task_id, note_id, lv, next_ord],
-    )
-    .map_err(map_err)?;
+    // 传了 point 才覆盖；没传就保留原来的（换档不该顺手清掉要点）
+    let sql = if point.is_some() {
+        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+         VALUES(?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(task_id,note_id)
+         DO UPDATE SET level=excluded.level, ord=excluded.ord, point=excluded.point"
+    } else {
+        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+         VALUES(?1,?2,?3,?4,?5,'')
+         ON CONFLICT(task_id,note_id)
+         DO UPDATE SET level=excluded.level, ord=excluded.ord"
+    };
+    conn.execute(sql, params![project_id, task_id, note_id, lv, next_ord, pt])
+        .map_err(map_err)?;
     let id: i64 = conn
         .query_row(
             "SELECT id FROM task_refs WHERE task_id=?1 AND note_id=?2",

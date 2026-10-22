@@ -45,7 +45,7 @@ import {
   type ExportLine,
 } from "../exportImage";
 import { reportError } from "../diag";
-import { buildTaskPrompt, copyText, type PromptRef, type PromptNeighbor } from "../aiPrompt";
+import { openPrompt } from "../aiPrompt";
 
 const store = useBoardStore();
 const canvasRef = ref<HTMLElement | null>(null);
@@ -244,12 +244,15 @@ function startMarquee(e: MouseEvent) {
 const dragOver = ref(false);
 
 function isChrome(t: HTMLElement | null) {
-  return !!t?.closest(".wb-node, .wb-toolbar, .wb-hint, .wb-empty, .wb-mode, .edge-menu");
+  return !!t?.closest(
+    ".wb-node, .wb-toolbar, .wb-hint, .wb-empty, .wb-mode, .edge-menu, .ref-menu"
+  );
 }
 
 function bgDown(e: MouseEvent) {
-  // 点空白先收起连线菜单（点在菜单上时，菜单自己 stop 了 pointerdown，走不到这里）
+  // 点空白先收起浮层（点在浮层上时，浮层自己 stop 了 pointerdown，走不到这里）
   if (edgePick.value) edgePick.value = null;
+  if (refPick.value) refPick.value = null;
   // 中键：任何地方都能平移
   if (e.button === 1) {
     e.preventDefault();
@@ -1934,13 +1937,85 @@ function noteLabel(noteId: number): string {
 }
 
 /** 点一下换一档：必须遵守 → 可以参考 → 仅作背景 → 必须遵守 */
-async function cycleRefLevel(taskId: number, noteId: number, level: number) {
-  const next = (level + 1) % 3;
+/**
+ * 依据气泡：点任务卡上的资料标签打开。
+ *
+ * 为什么不是"点一下循环换档"：这样点完看不出当前是第几档，也放不下要点。
+ * 要点是给 AI 唯一能拿到材料内容的入口，必须有个能写字的地方。
+ */
+const refPick = ref<{
+  taskId: number;
+  noteId: number;
+  level: number;
+  x: number;
+  y: number;
+} | null>(null);
+const refPoint = ref("");
+const refMenuEl = ref<HTMLElement | null>(null);
+const refMenuFlip = ref(false);
+
+async function placeRefMenu() {
+  await nextTick();
+  const el = refMenuEl.value;
+  const box = canvasRef.value;
+  const p = refPick.value;
+  if (!el || !box || !p) return;
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const maxX = box.clientWidth - w / 2 - 10;
+  const minX = w / 2 + 10;
+  const x = Math.min(maxX, Math.max(minX, p.x));
+  const maxY = box.clientHeight - h - 10;
+  const y = Math.max(10, Math.min(maxY, p.y));
+  if (x !== p.x || y !== p.y) refPick.value = { ...p, y };
+  refMenuFlip.value = false;
+}
+
+function openRefMenu(e: MouseEvent, taskId: number, noteId: number, level: number) {
+  const r = canvasRef.value?.getBoundingClientRect();
+  refPick.value = {
+    taskId,
+    noteId,
+    level,
+    x: e.clientX - (r?.left ?? 0),
+    y: e.clientY - (r?.top ?? 0) + 18,
+  };
+  refPoint.value = store.refsOfTask(taskId).find((x) => x.note_id === noteId)?.point ?? "";
+  void placeRefMenu();
+}
+
+function closeRefMenu() {
+  refPick.value = null;
+}
+
+async function setRefLevel(level: number) {
+  const p = refPick.value;
+  if (!p) return;
   try {
-    await store.setRef(taskId, noteId, next);
+    await store.setRef(p.taskId, p.noteId, level);
+    refPick.value = { ...p, level };
   } catch (e) {
     reportError("改依据等级", e);
   }
+}
+
+async function saveRefPoint() {
+  const p = refPick.value;
+  if (!p) return;
+  try {
+    await store.setRef(p.taskId, p.noteId, p.level, refPoint.value.trim());
+    ElMessage.success("要点已存，下次生成指令会带上");
+    closeRefMenu();
+  } catch (e) {
+    reportError("保存要点", e);
+  }
+}
+
+async function removeRefFromMenu() {
+  const p = refPick.value;
+  if (!p) return;
+  closeRefMenu();
+  await dropRef(p.taskId, p.noteId);
 }
 
 async function dropRef(taskId: number, noteId: number) {
@@ -1952,72 +2027,9 @@ async function dropRef(taskId: number, noteId: number) {
 }
 
 // ---- 给 AI 的指令 ----
-
-/** 预览弹窗：先让人看清生成了什么，再复制 */
-const aiDialog = ref(false);
-const aiText = ref("");
-const aiTitle = ref("");
-
-function promptRefsOf(taskId: number): PromptRef[] {
-  return store.refsOfTask(taskId).map((r) => {
-    const n = store.notes.find((x) => x.id === r.note_id);
-    const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
-    return { label: noteLabel(r.note_id), level: r.level, fileName: f?.name };
-  });
-}
-
-/** 上下游只看任务之间的连线；资料连过来的依据不算上下游 */
-function promptNeighborsOf(taskId: number) {
-  const upstream: PromptNeighbor[] = [];
-  const downstream: PromptNeighbor[] = [];
-  for (const e of store.edges) {
-    if (e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
-      const up = taskById(e.from_id);
-      if (up) {
-        upstream.push({
-          label: up.title,
-          seq: store.numberOf(up.id),
-          kind: e.kind,
-          done: !!up.completed_at,
-        });
-      }
-    }
-    if (e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
-      const dn = taskById(e.to_id);
-      if (dn) downstream.push({ label: dn.title, seq: store.numberOf(dn.id), kind: e.kind });
-    }
-  }
-  return { upstream, downstream };
-}
-
-function taskPromptText(t: Task): string {
-  const { upstream, downstream } = promptNeighborsOf(t.id);
-  return buildTaskPrompt({
-    projectName: store.currentProject?.name ?? "（未命名项目）",
-    taskTitle: t.title,
-    taskSeq: store.numberOf(t.id),
-    columnName: colName(t),
-    description: t.description,
-    refs: promptRefsOf(t.id),
-    upstream,
-    downstream,
-  });
-}
-
+// 拼装逻辑在 aiPrompt.ts 里（白板任务卡和看板卡片共用同一份），这里只负责打开弹窗
 function openAiPrompt(t: Task) {
-  aiText.value = taskPromptText(t);
-  aiTitle.value = `给 AI 的指令 · T${store.numberOf(t.id)} ${t.title}`;
-  aiDialog.value = true;
-}
-
-async function doCopyAi() {
-  const ok = await copyText(aiText.value);
-  if (ok) {
-    ElMessage.success("已复制，直接粘到对话框里");
-    aiDialog.value = false;
-  } else {
-    ElMessage.warning("复制没成功，请在上面框里手动全选复制");
-  }
+  openPrompt(store, t.id);
 }
 
 // ---- 树：任务 / 导图共用一套父子关系（就是白板连线） ----
@@ -4089,17 +4101,46 @@ const numOf = (t: Task) => store.numberOf(t.id);
       </div>
     </div>
 
-    <!-- 给 AI 的指令：先看清再复制 -->
-    <el-dialog v-model="aiDialog" :title="aiTitle" width="660px" append-to-body>
-      <div class="ai-tip">
-        下面这段直接粘给 AI 就行。改了任务说明或资料等级，重新点一次会自动更新。
+    <!-- 依据气泡：换档 + 写要点。要点是 AI 唯一能读到材料内容的地方 -->
+    <div
+      v-if="refPick"
+      ref="refMenuEl"
+      class="ref-menu"
+      :style="{ left: refPick.x + 'px', top: refPick.y + 'px' }"
+      @pointerdown.stop
+      @mousedown.stop
+      @mouseup.stop
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <div class="rm-head" :title="noteLabel(refPick.noteId)">{{ noteLabel(refPick.noteId) }}</div>
+      <div class="rm-levels">
+        <button
+          v-for="lv in REF_LEVELS"
+          :key="lv.v"
+          class="rm-lv"
+          :class="['lv-' + lv.v, { on: refPick.level === lv.v }]"
+          :title="lv.hint"
+          @click="setRefLevel(lv.v)"
+        >
+          {{ lv.label }}
+        </button>
       </div>
-      <textarea class="ai-text" readonly :value="aiText"></textarea>
-      <template #footer>
-        <el-button @click="aiDialog = false">关闭</el-button>
-        <el-button type="primary" @click="doCopyAi">复制这段</el-button>
-      </template>
-    </el-dialog>
+      <textarea
+        v-model="refPoint"
+        class="rm-point"
+        rows="3"
+        placeholder="这份材料里，这个任务必须照着做的是什么？例如：主色限墨绿系，禁止高饱和红（第 12 页）"
+        @keydown.stop
+      ></textarea>
+      <div class="rm-foot">
+        <button class="rm-del" title="把这份资料从这个任务上移除" @click="removeRefFromMenu">
+          移除
+        </button>
+        <span class="rm-tip">AI 读不到文件，只认这段字</span>
+        <button class="rm-save" @click="saveRefPoint">保存</button>
+      </div>
+    </div>
 
     <div class="wb-content" :style="contentStyle">
       <!-- 框选矩形 -->
@@ -4324,12 +4365,14 @@ const numOf = (t: Task) => store.numberOf(t.id);
                 refLabel(r.level) +
                 '：' +
                 noteLabel(r.note_id) +
-                '（左键换档，右键移除）'
+                (r.point ? '\n要点：' + r.point : '\n还没写要点') +
+                '（点开可以换档、写要点）'
               "
-              @click.stop="cycleRefLevel(t.id, r.note_id, r.level)"
+              @pointerdown.stop
+              @click.stop="openRefMenu($event, t.id, r.note_id, r.level)"
               @contextmenu.prevent.stop="dropRef(t.id, r.note_id)"
             >
-              {{ noteLabel(r.note_id) }}
+              <span v-if="r.point" class="tn-ref-dot"></span>{{ noteLabel(r.note_id) }}
             </span>
           </div>
         </template>
@@ -5943,6 +5986,124 @@ html.dark .box-cluster.cs-weak {
 .box-node.sel {
   z-index: 0;
 }
+/* ---------- 依据气泡：换档 + 写要点 ---------- */
+.ref-menu {
+  position: absolute;
+  z-index: 40;
+  width: 300px;
+  padding: 12px;
+  transform: translate(-50%, 0);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+}
+.rm-head {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rm-levels {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.rm-lv {
+  flex: 1;
+  padding: 4px 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-subtle);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.rm-lv:hover {
+  border-color: var(--accent);
+}
+/* 三档跟任务卡上的小标签用同一套视觉，点开前后不会认成两个东西 */
+.rm-lv.lv-0.on {
+  background: var(--text-subtle);
+  border-color: var(--text-subtle);
+  color: var(--bg-elevated);
+}
+.rm-lv.lv-1.on {
+  border-color: var(--text);
+  color: var(--text);
+  font-weight: 600;
+}
+.rm-lv.lv-2.on {
+  border-style: dashed;
+  border-color: var(--text-subtle);
+  color: var(--text-subtle);
+  font-weight: 600;
+}
+.rm-point {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+.rm-point:focus {
+  border-color: var(--accent);
+}
+.rm-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.rm-tip {
+  flex: 1;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+.rm-del,
+.rm-save {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.rm-del {
+  border: 1px solid var(--danger, #d9534f);
+  background: transparent;
+  color: var(--danger, #d9534f);
+}
+.rm-del:hover {
+  background: color-mix(in srgb, var(--danger, #d9534f) 10%, transparent);
+}
+.rm-save {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+/* 写过要点的标签带一个小圆点：一眼能看出这条已经能传给 AI 了 */
+.tn-ref-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-right: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+  opacity: 0.75;
+}
+
 /* 只有色板展开时才临时抬起来，不然色块会被框里的卡片压住点不到 */
 .box-node.pal-open {
   z-index: 7;

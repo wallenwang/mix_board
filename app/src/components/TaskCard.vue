@@ -9,6 +9,7 @@ import TaskDialog from "./TaskDialog.vue";
 import AppIcon from "./AppIcon.vue";
 import { ElMessageBox } from "element-plus";
 import { reportError } from "../diag";
+import { openPrompt } from "../aiPrompt";
 
 const props = defineProps<{ task: Task }>();
 const store = useBoardStore();
@@ -36,6 +37,12 @@ const isDone = computed(() => !!props.task.completed_at);
 async function toggleDone(e: Event) {
   e.stopPropagation();
   await store.toggleDone(props.task.id);
+}
+
+/** 生成给 AI 的指令：内容跟白板任务卡上是同一份 */
+function openAi(e: Event) {
+  e.stopPropagation();
+  openPrompt(store, props.task.id);
 }
 
 async function quickDelete(e: Event) {
@@ -120,6 +127,13 @@ function openEdit(e?: Event) {
         >
       </div>
       <div class="task-acts">
+        <button
+          class="task-act ai"
+          title="生成给 AI 的指令：任务说明 + 材料三档 + 上下游 + 要交什么"
+          @click="openAi"
+        >
+          AI
+        </button>
         <button class="task-act" title="编辑任务（标题 / 备注 / 日期 / 优先级 / 标签）" @click.stop="openEdit($event)">
           <AppIcon name="edit" :size="12" :stroke="1.9" />
         </button>
@@ -259,6 +273,20 @@ function openEdit(e?: Event) {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* AI 按钮：文字而不是图标，12px 的图标里塞不下字 */
+.task-act.ai {
+  width: auto;
+  padding: 0 5px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.task-act.ai:hover {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
 .task-act.del:hover {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);

@@ -99,6 +99,8 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             note_id    INTEGER NOT NULL REFERENCES board_notes(id) ON DELETE CASCADE,
             level      INTEGER NOT NULL DEFAULT 1,
             ord        INTEGER NOT NULL DEFAULT 0,
+            -- 这条依据对这个任务的要点（AI 读不到本地文件，只能靠这句）
+            point      TEXT NOT NULL DEFAULT '',
             UNIQUE(task_id, note_id)
         );
 
@@ -207,6 +209,22 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     // strength 只给"依据"用：0=必须遵守 1=可以参考 2=仅作背景。
     // 不存权重数值 —— 没人说得清该给 70 还是 75。
     add_edge_col("strength", "strength INTEGER NOT NULL DEFAULT 0")?;
+
+    // Migration: 这条依据对「这个任务」的要点。
+    // 为什么需要：AI 打不开本地文件，光给文件名它不知道里面写了什么。
+    // 一句话摘出「这份材料对这个任务的关键约束」，AI 才真正拿到了内容。
+    // 要点挂在关系上（同一份资料对不同任务可以摘不同的话），不挂在资料上。
+    let ref_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(task_refs)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !ref_cols.iter().any(|c| c == "point") {
+        conn.execute(
+            "ALTER TABLE task_refs ADD COLUMN point TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
 
     // Migration: 资料内容指纹 —— 同一份文件重复上传时直接复用，不占两份空间。
     let file_cols: Vec<String> = {

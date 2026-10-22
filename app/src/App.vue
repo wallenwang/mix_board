@@ -19,6 +19,7 @@ import FloatWindow from "./components/FloatWindow.vue";
 import ExportMenu from "./components/ExportMenu.vue";
 import FilterBar from "./components/FilterBar.vue";
 import TrashDialog from "./components/TrashDialog.vue";
+import AiPromptDialog from "./components/AiPromptDialog.vue";
 import NewTaskInline from "./components/NewTaskInline.vue";
 import { runSelfTest, reportError } from "./diag";
 
@@ -868,6 +869,8 @@ watch(
   </div>
 
   <TrashDialog v-model="trashOpen" />
+  <!-- 给 AI 的指令：白板任务卡与看板卡片都走这一个弹窗 -->
+  <AiPromptDialog />
   <NewTaskInline v-if="store.currentProject" v-model="newTaskOpen" :column-id="newTaskColId" />
 
   <!-- 浮动 AI 网页面板：位置/尺寸都记住 -->

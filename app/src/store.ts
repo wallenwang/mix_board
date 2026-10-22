@@ -194,9 +194,10 @@ export const useBoardStore = defineStore("board", () => {
   }
 
   /** 挂一份资料到任务（已存在则改等级） */
-  async function setRef(taskId: number, noteId: number, level: number) {
+  /** point 不传 = 只改档位，不动已写的要点 */
+  async function setRef(taskId: number, noteId: number, level: number, point?: string) {
     if (currentProjectId.value == null) return;
-    await api.setTaskRef(currentProjectId.value, taskId, noteId, level);
+    await api.setTaskRef(currentProjectId.value, taskId, noteId, level, undefined, point);
     taskRefs.value = await api.listTaskRefs(currentProjectId.value);
   }
 

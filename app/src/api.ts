@@ -184,14 +184,16 @@ const real = {
   // 任务用到的资料与等级（等级挂在关系上，不在资料上）
   listTaskRefs: (projectId: number) => invoke<TaskRef[]>("list_task_refs", { projectId }),
   /** 挂一份资料到任务，或改它这条关系上的等级 */
+  /** point 不传 = 不动要点（换档时不会顺手清空已写的要点） */
   setTaskRef: (
     projectId: number,
     taskId: number,
     noteId: number,
     level?: number,
-    ord?: number
+    ord?: number,
+    point?: string
   ) =>
-    invoke<number>("set_task_ref", { projectId, taskId, noteId, level, ord }),
+    invoke<number>("set_task_ref", { projectId, taskId, noteId, level, ord, point }),
   deleteTaskRef: (taskId: number, noteId: number) =>
     invoke<void>("delete_task_ref", { taskId, noteId }),
 
