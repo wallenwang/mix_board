@@ -106,8 +106,11 @@ function openEdit(e?: Event) {
       </button>
 
       <div class="task-title">
-        <span v-if="task.seq" class="task-seq" :title="'任务编号 T' + task.seq + '：跟 AI 交代时直接说这个号'"
-          >T{{ task.seq }}</span
+        <span
+          v-if="store.numberOf(task.id)"
+          class="task-seq"
+          :title="'任务编号 T' + store.numberOf(task.id) + '：跟 AI 交代时直接说这个号'"
+          >T{{ store.numberOf(task.id) }}</span
         >{{ task.title }}
         <span
           v-if="store.taskChildCount(task.id)"

@@ -58,8 +58,8 @@ export interface ExportNode {
   subColor?: string;
   /** 文档卡片摘要 */
   summary?: string;
-  /** 任务编号（T1、T2…），画在标题前 */
-  seq?: number;
+  /** 任务编号（1、2.1…），画在标题前 */
+  seq?: string;
   /** 这个任务用到的资料，画在卡片底部 */
   refs?: { label: string; level: number }[];
 }

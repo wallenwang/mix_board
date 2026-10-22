@@ -22,7 +22,8 @@ export interface PromptRef {
 
 export interface PromptNeighbor {
   label: string;
-  seq?: number;
+  /** 层级编号（"2.1"），没有就不显示 */
+  seq?: string;
   /** decompose 上级 / precede 前置 / produce 上游产出 */
   kind: string;
   done?: boolean;
@@ -31,7 +32,8 @@ export interface PromptNeighbor {
 export interface PromptCtx {
   projectName: string;
   taskTitle: string;
-  taskSeq: number;
+  /** 层级编号，如 "2.1" */
+  taskSeq: string;
   columnName: string;
   description: string;
   refs: PromptRef[];

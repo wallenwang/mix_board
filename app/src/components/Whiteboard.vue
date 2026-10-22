@@ -82,7 +82,7 @@ function centerOfView() {
 }
 
 // ---- tools ----
-type Tool = "select" | "note" | "text" | "mind" | "box" | "link";
+type Tool = "select" | "note" | "text" | "mind" | "box" | "task" | "link";
 const tool = ref<Tool>("select");
 
 /* ------------------------------------------------------------------
@@ -265,7 +265,8 @@ function bgDown(e: MouseEvent) {
     tool.value === "note" ||
     tool.value === "text" ||
     tool.value === "mind" ||
-    tool.value === "box"
+    tool.value === "box" ||
+    tool.value === "task"
   ) {
     void createAtPointer(e);
     return;
@@ -815,10 +816,48 @@ async function createNode(kind: NodeKind, x: number, y: number, opts: { edit?: b
 async function createAtPointer(e: MouseEvent) {
   const w = screenToWorld(e.clientX, e.clientY);
   const t = tool.value;
+  if (t === "task") {
+    await addTaskAt(w.x - TASK_W / 2, w.y - TASK_H / 2);
+    if (!e.shiftKey) tool.value = "select";
+    return;
+  }
   const kind: NodeKind =
     t === "mind" ? "mind" : t === "box" ? "box" : t === "text" ? "text" : "note";
   await createNode(kind, w.x - 40, w.y - 20, { edit: kind !== "box" });
   if (!e.shiftKey) tool.value = "select";
+}
+
+/**
+ * 在白板上直接建一个任务。
+ *
+ * 建的是**真任务**，跟看板里新建的完全一样：会落到看板第一列，
+ * 所以看板那边刷新就能看到，不用同步两份数据。
+ */
+async function addTaskAt(wx: number, wy: number): Promise<number | null> {
+  if (store.currentProjectId == null) return null;
+  const col = store.columns[0];
+  if (!col) {
+    ElMessage.warning("这个项目还没有看板列，请先在看板里建一列");
+    return null;
+  }
+  try {
+    const id = await api.createTask({
+      project_id: store.currentProjectId,
+      column_id: col.id,
+      title: "新任务",
+    });
+    await api.setTaskPos(id, wx, wy);
+    await store.refreshTasks();
+    const t = taskById(id);
+    if (t) {
+      selectOnly("task", id);
+      await startEditTask(t);
+    }
+    return id;
+  } catch (e) {
+    reportError("新建任务", e);
+    return null;
+  }
 }
 
 async function addNote() {
@@ -1135,7 +1174,10 @@ async function revealFromMenu() {
 }
 
 /** 端口拖到空白处时，可以就地长出哪些节点 */
-const NODE_TYPES: { kind: NodeKind; label: string; hint: string }[] = [
+type MenuKind = NodeKind | "task";
+
+const NODE_TYPES: { kind: MenuKind; label: string; hint: string }[] = [
+  { kind: "task", label: "任务", hint: "看板上会同步出现，可以继续往下拆" },
   { kind: "note", label: "便签", hint: "随手记一句" },
   { kind: "text", label: "文字", hint: "纯文字标签" },
   { kind: "mind", label: "思维导图", hint: "继续长分支" },
@@ -1170,10 +1212,22 @@ function openTypeMenu(
 }
 
 /** 在菜单里选的类型 → 建成节点，并按端口方向自动连上 */
-async function createFromTypeMenu(kind: NodeKind) {
+async function createFromTypeMenu(kind: MenuKind) {
   const m = typeMenu.value;
   typeMenu.value = null;
   if (!m || store.currentProjectId == null) return;
+  // 任务不是白板节点，走任务那条路：建成真任务，再按端口方向连上
+  if (kind === "task") {
+    const from = m.from;
+    const id = await addTaskAt(m.wx - TASK_W / 2, m.wy - TASK_H / 2);
+    if (id == null) return;
+    if (from.role === "out") {
+      await connect({ kind: from.kind, id: from.id }, { kind: "task", id });
+    } else {
+      await connect({ kind: "task", id }, { kind: from.kind, id: from.id });
+    }
+    return;
+  }
   // 图片/资料要先让用户选文件，选完再建节点（位置与连线方向先存着）
   if (kind === "file") {
     portFileCtx.value = { wx: m.wx, wy: m.wy, from: m.from };
@@ -1611,7 +1665,7 @@ function promptNeighborsOf(taskId: number) {
       if (up) {
         upstream.push({
           label: up.title,
-          seq: up.seq,
+          seq: store.numberOf(up.id),
           kind: e.kind,
           done: !!up.completed_at,
         });
@@ -1619,7 +1673,7 @@ function promptNeighborsOf(taskId: number) {
     }
     if (e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
       const dn = taskById(e.to_id);
-      if (dn) downstream.push({ label: dn.title, seq: dn.seq, kind: e.kind });
+      if (dn) downstream.push({ label: dn.title, seq: store.numberOf(dn.id), kind: e.kind });
     }
   }
   return { upstream, downstream };
@@ -1630,7 +1684,7 @@ function taskPromptText(t: Task): string {
   return buildTaskPrompt({
     projectName: store.currentProject?.name ?? "（未命名项目）",
     taskTitle: t.title,
-    taskSeq: t.seq,
+    taskSeq: store.numberOf(t.id),
     columnName: colName(t),
     description: t.description,
     refs: promptRefsOf(t.id),
@@ -1641,7 +1695,7 @@ function taskPromptText(t: Task): string {
 
 function openAiPrompt(t: Task) {
   aiText.value = taskPromptText(t);
-  aiTitle.value = `给 AI 的指令 · T${t.seq} ${t.title}`;
+  aiTitle.value = `给 AI 的指令 · T${store.numberOf(t.id)} ${t.title}`;
   aiDialog.value = true;
 }
 
@@ -2703,7 +2757,7 @@ async function buildScene() {
       sub,
       subColor: pr.color,
       // 编号与依据都要画进导出图，屏幕上有的缺一个就对不上
-      seq: t.seq,
+      seq: numOf(t),
       refs: store.refsOfTask(t.id).map((r) => ({
         label: noteLabel(r.note_id),
         level: r.level,
@@ -3434,6 +3488,8 @@ function colName(t: Task) {
 function prio(t: Task) {
   return priorityOf(t.priority);
 }
+/** 层级编号（1 / 2.1 / 2.1.3），按当前父子关系实时算 */
+const numOf = (t: Task) => store.numberOf(t.id);
 </script>
 
 <template>
@@ -3501,6 +3557,14 @@ function prio(t: Task) {
           @click="tool = 'box'"
         >
           <AppIcon name="box" :size="17" />
+        </button>
+        <button
+          class="tb ico"
+          :class="{ on: tool === 'task' }"
+          title="任务：点空白处建一个（看板上同步出现，可以继续往下拆子任务）"
+          @click="tool = 'task'"
+        >
+          <AppIcon name="task" :size="17" />
         </button>
 
         <!-- 连线：主体切换连线模式；右下小三角换线条样式（长按主体也能调出来） -->
@@ -3878,10 +3942,10 @@ function prio(t: Task) {
           />
           <div v-else class="tn-title">
             <span
-              v-if="t.seq"
+              v-if="numOf(t)"
               class="tn-seq"
-              :title="'任务编号 T' + t.seq + '：跟 AI 交代时直接说这个号就行'"
-              >T{{ t.seq }}</span
+              :title="'任务编号 T' + numOf(t) + '：跟 AI 交代时直接说这个号就行'"
+              >T{{ numOf(t) }}</span
             >{{ t.title }}
           </div>
           <div class="tn-sub">

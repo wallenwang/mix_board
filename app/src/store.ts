@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { api } from "./api";
 import { daysLeft } from "./due";
+import { computeTaskNumbers } from "./numbering";
 import { reportError } from "./diag";
 import type {
   Project,
@@ -66,6 +67,17 @@ export const useBoardStore = defineStore("board", () => {
   const allTasks = computed<Task[]>(() =>
     Object.values(tasksByCol.value).flat()
   );
+
+  /**
+   * 任务编号（T2、T2.1、T2.1.3）。按当前父子关系实时算出来，
+   * 所以把 T3 挂到 T2 下面，它会自己变成 T2.1，不需要额外同步。
+   */
+  const taskNumbers = computed(() => computeTaskNumbers(allTasks.value, edges.value));
+
+  /** 某个任务的编号；还没算出来时给空串，界面会自然不显示 */
+  function numberOf(taskId: number): string {
+    return taskNumbers.value.get(taskId) ?? "";
+  }
 
   function tagOf(id: number): Tag | undefined {
     return tags.value.find((t) => t.id === id);
@@ -441,6 +453,7 @@ export const useBoardStore = defineStore("board", () => {
     allTasks, tagOf, fileById, sortedCol, visibleCount,
     taskParentOf, taskDepth, taskDescendants, taskChildCount,
     toggleDone, setDates, setProgress, setBarColor, colProgress, projectProgress, overdueTasks,
+    taskNumbers, numberOf,
     taskRefs, refsOfTask, tasksUsingNote, refLevelOf, setRef, dropRef,
     loadBootstrap, loadProject, refreshTasks, refreshColumns, refreshProjects, refreshBoard,
     refreshDocs, docFocus, focusDoc, docTouched, touchDoc, docById,
