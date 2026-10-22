@@ -504,20 +504,29 @@ function withDescendants(roots: string[]): string[] {
 }
 
 /**
- * 某个节点是否被分组框"收纳"了 —— 判据是**节点中心点落在框内**。
- * 用中心点而不是"完全包含"，是因为用户把一张卡拖进分区时，往往只拖到一半；
- * 只要重心进来了就算这一组的，符合直觉。
+ * 某个节点是否被分组框"收纳"了 —— 判据是**整个卡片都在框内**。
+ *
+ * 早先用的是"中心点在框内"，太松：卡片只要压住框边一点就算这一组的，
+ * 拖框时会连带把框外那张卡一起拖走，看上去就是"碰一下就粘上"。
+ * 改成完全包含之后，成员关系与肉眼看到的一致；想收进组就整张拖进去，
+ * 露出一半就是没进去。
+ *
+ * 留 0.5 的容差，避免浮点位置让"刚好贴着边"的卡片判不进来。
  */
-function centerInBox(box: BoardNote, kind: "task" | "note", id: number): boolean {
+function insideBox(box: BoardNote, kind: "task" | "note", id: number): boolean {
   if (kind === "note" && id === box.id) return false;
   const p = posOf(kind, id);
   const s = sizeAt(kind, id);
   if (!s.w || !s.h) return false;
   const bp = posOf("note", box.id);
   const bs = noteSize(box);
-  const cx = p.x + s.w / 2;
-  const cy = p.y + s.h / 2;
-  return cx > bp.x && cx < bp.x + bs.w && cy > bp.y && cy < bp.y + bs.h;
+  const t = 0.5;
+  return (
+    p.x >= bp.x - t &&
+    p.y >= bp.y - t &&
+    p.x + s.w <= bp.x + bs.w + t &&
+    p.y + s.h <= bp.y + bs.h + t
+  );
 }
 
 /**
@@ -528,11 +537,11 @@ function centerInBox(box: BoardNote, kind: "task" | "note", id: number): boolean
 function nodesInBox(box: BoardNote): string[] {
   const out: string[] = [];
   for (const t of store.allTasks) {
-    if (centerInBox(box, "task", t.id)) out.push(keyOf("task", t.id));
+    if (insideBox(box, "task", t.id)) out.push(keyOf("task", t.id));
   }
   for (const n of store.notes) {
     if (n.id === box.id) continue;
-    if (centerInBox(box, "note", n.id)) out.push(keyOf("note", n.id));
+    if (insideBox(box, "note", n.id)) out.push(keyOf("note", n.id));
   }
   return out;
 }
@@ -1078,7 +1087,7 @@ async function cycleRadius(n: BoardNote) {
 }
 
 /* ------------------------------------------------------------------
- * 分组框的约束强度：强依据 / 参考 / 背景
+ * 分组框的约束强度：强依据 / 参考 / 弱参考
  *
  * 它回答的是「这一批材料整体有多硬」，跟任务卡上那一排资料等级不是一回事：
  * 任务卡上的等级挂在 task_refs 这条关系上（同一份资料对不同任务可以不同档），
@@ -1086,41 +1095,45 @@ async function cycleRadius(n: BoardNote) {
  *   a) 画布上一眼看出哪块是硬材料；
  *   b) 从框里拖资料到任务时，给那条依据一个合适的默认等级。
  *
- * 存在 meta.cluster 里，跟 meta.look 用同一个 JSON 字段，不加数据库列。
+ * 三档对应任务卡上的三档等级，用同一套意思，换个更好懂的词：
+ *   强依据 = 必须遵守、参考 = 可以参考、弱参考 = 仅作背景。
+ * 不用"背景"这个词，因为它抽象；"弱参考"跟"强依据"对得上，一眼知道是弱的那头。
+ *
+ * 默认就是"参考"——所以新框天生带着一个可点的标签，不需要先"标强度"。
+ * 存在 meta.cluster 里，跟 meta.look 用同一个 JSON 字段，不加数据库列；
+ * 老框没有这个键，按缺省当"参考"，不用迁移。
  * ------------------------------------------------------------------ */
-type ClusterStrength = "strong" | "ref" | "bg";
+type ClusterStrength = "strong" | "ref" | "weak";
 const CLUSTER_META: {
   v: ClusterStrength;
   label: string;
-  short: string;
   hint: string;
   color: string;
 }[] = [
   {
     v: "strong",
     label: "强依据",
-    short: "冲突时以它为准",
-    hint: "强依据：这一组是硬材料，结论有冲突时以它为准",
+    hint: "强依据：这一组是硬材料，结论有冲突时以它为准（拖到任务上默认算「必须遵守」）",
     color: "#D9822B",
   },
   {
     v: "ref",
     label: "参考",
-    short: "没冲突时补充",
-    hint: "参考：有启发但不强制，没有冲突时补充进来",
+    hint: "参考：有启发但不强制，没有冲突时补充进来（默认档）",
     color: "#3B7DDD",
   },
   {
-    v: "bg",
-    label: "背景",
-    short: "只交代语境",
-    hint: "背景：只用来了解语境，不要当依据引用",
+    v: "weak",
+    label: "弱参考",
+    hint: "弱参考：只用来了解语境，别当依据引用（拖到任务上默认算「仅作背景」）",
     color: "#98A2B6",
   },
 ];
 /** 强度 → 依据默认等级（0 必须遵守 / 1 可以参考 / 2 仅作背景） */
-const CLUSTER_LEVEL: Record<ClusterStrength, number> = { strong: 0, ref: 1, bg: 2 };
+const CLUSTER_LEVEL: Record<ClusterStrength, number> = { strong: 0, ref: 1, weak: 2 };
 const CLUSTER_MAP = new Map(CLUSTER_META.map((m) => [m.v, m]));
+/** 点一下循环的次序 */
+const CLUSTER_CYCLE: ClusterStrength[] = ["strong", "ref", "weak"];
 
 function metaField(n: BoardNote): Record<string, unknown> {
   try {
@@ -1130,10 +1143,14 @@ function metaField(n: BoardNote): Record<string, unknown> {
   }
 }
 
-function strengthOf(n: BoardNote | undefined): ClusterStrength | null {
-  if (!n || n.kind !== "box") return null;
+/** 框的强度；没标过（或根本不是框）一律当"参考" */
+function strengthOf(n: BoardNote | undefined): ClusterStrength {
+  if (!n || n.kind !== "box") return "ref";
   const v = metaField(n).cluster;
-  return v === "strong" || v === "ref" || v === "bg" ? (v as ClusterStrength) : null;
+  if (v === "strong" || v === "ref" || v === "weak") return v as ClusterStrength;
+  // 老数据里可能存着已废弃的 "bg"，按弱参考处理
+  if (v === "bg") return "weak";
+  return "ref";
 }
 
 /** 写强度：同时把框的边框/标题色换成该档的标准色，一眼能分辨。之后仍可手动改色。 */
@@ -1150,24 +1167,10 @@ async function setStrength(n: BoardNote, v: ClusterStrength) {
   }
 }
 
-/** 点一下在 未标注 → 强依据 → 参考 → 背景 → 未标注 之间循环 */
+/** 点一下换下一档：强依据 → 参考 → 弱参考 → 强依据 */
 async function cycleStrength(n: BoardNote) {
-  const order: (ClusterStrength | null)[] = [null, "strong", "ref", "bg"];
-  const cur = strengthOf(n);
-  const i = order.findIndex((x) => x === cur);
-  const next = order[(i + 1) % order.length];
-  if (next == null) {
-    const m = metaField(n);
-    delete m.cluster;
-    try {
-      await api.updateNote(n.id, { meta: JSON.stringify(m) });
-      await store.refreshBoard();
-    } catch (e) {
-      reportError("清除约束强度", e);
-    }
-    return;
-  }
-  await setStrength(n, next);
+  const i = CLUSTER_CYCLE.indexOf(strengthOf(n));
+  await setStrength(n, CLUSTER_CYCLE[(i + 1) % CLUSTER_CYCLE.length]);
 }
 
 /** 这个节点被哪个分组框收着：取面积最小的那个（套框时算最里面一层） */
@@ -1176,7 +1179,7 @@ function boxOf(kind: "task" | "note", id: number): BoardNote | null {
   let bestArea = Infinity;
   for (const b of store.notes) {
     if (b.kind !== "box") continue;
-    if (!centerInBox(b, kind, id)) continue;
+    if (!insideBox(b, kind, id)) continue;
     const sz = noteSize(b);
     const area = sz.w * sz.h;
     if (area < bestArea) {
@@ -1190,7 +1193,7 @@ function boxOf(kind: "task" | "note", id: number): BoardNote | null {
 /** 资料所在分组的强度；没有框或没标注就是 null（拖线时按 1 参考处理） */
 function clusterOfNote(n: BoardNote): ClusterStrength | null {
   const b = boxOf("note", n.id);
-  return strengthOf(b);
+  return b ? strengthOf(b) : null;
 }
 
 /** 选中集合里除分组框之外的节点 —— 成组只看这些 */
@@ -1210,16 +1213,22 @@ function groupableKeys(): string[] {
  * ------------------------------------------------------------------ */
 const boxDraft = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
+/**
+ * 预览矩形：**只写世界坐标**。
+ *
+ * 这个 div 挂在 .wb-content 里面，而 .wb-content 自己已经带了
+ * `translate(panX, panY) scale(zoom)`；再乘一遍 zoom、再加一遍 pan，
+ * 预览就会和鼠标错开一大截（偏移量正好等于画布的平移量）。
+ * 框选矩形（marqueeStyle）一直是这么写的，照它来就对齐了。
+ */
 const boxDraftStyle = computed(() => {
   const d = boxDraft.value;
   if (!d) return {};
-  const x = Math.min(d.x0, d.x1) * zoom.value + panX.value;
-  const y = Math.min(d.y0, d.y1) * zoom.value + panY.value;
   return {
-    left: x + "px",
-    top: y + "px",
-    width: Math.abs(d.x1 - d.x0) * zoom.value + "px",
-    height: Math.abs(d.y1 - d.y0) * zoom.value + "px",
+    left: Math.min(d.x0, d.x1) + "px",
+    top: Math.min(d.y0, d.y1) + "px",
+    width: Math.abs(d.x1 - d.x0) + "px",
+    height: Math.abs(d.y1 - d.y0) + "px",
   };
 });
 
@@ -1639,7 +1648,7 @@ async function connect(
     }
     await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
     if (autoKind === "evidence") {
-      // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、背景→仅作背景。
+      // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、弱参考→仅作背景。
       // 没放进任何分组（或框上没标强度）就按「可以参考」。任务卡上仍可随时改档。
       const src = noteById(from.id);
       const st = src ? clusterOfNote(src) : null;
@@ -4125,36 +4134,31 @@ const numOf = (t: Task) => store.numberOf(t.id);
         @pointerdown="startDrag($event, 'note', n.id)"
         @dblclick="startEditNote(n)"
       >
-        <div class="box-title" :style="{ background: n.color }">
-          <template v-if="editingNote === n.id">
-            <input
-              v-model="editText"
-              class="box-input"
-              @pointerdown.stop
-              @keydown.enter="commitNoteText(n)"
-              @blur="commitNoteText(n)"
-            />
-          </template>
-          <template v-else>{{ n.text || "分组" }}</template>
+        <!-- 名称和强度标签并排：左边说"这是什么区"，右边说"这区有多硬"。
+             标签常显，不选中也能看见，因为它本身就是分区的一部分信息。 -->
+        <div class="box-head">
+          <div class="box-title" :style="{ background: n.color }">
+            <template v-if="editingNote === n.id">
+              <input
+                v-model="editText"
+                class="box-input"
+                @pointerdown.stop
+                @keydown.enter="commitNoteText(n)"
+                @blur="commitNoteText(n)"
+              />
+            </template>
+            <template v-else>{{ n.text || "分组" }}</template>
+          </div>
+          <button
+            class="box-cluster"
+            :class="'cs-' + strengthOf(n)"
+            :title="CLUSTER_MAP.get(strengthOf(n))?.hint + '（点一下换下一档）'"
+            @pointerdown.stop
+            @click.stop="cycleStrength(n)"
+          >
+            {{ CLUSTER_MAP.get(strengthOf(n))?.label }}
+          </button>
         </div>
-        <button
-          class="box-cluster"
-          :class="strengthOf(n) ? 'cs-' + strengthOf(n) : 'cs-none'"
-          :title="
-            strengthOf(n)
-              ? CLUSTER_MAP.get(strengthOf(n) as ClusterStrength)?.hint +
-                '（点一下换下一档；从框里拖资料到任务时，默认就按这一档）'
-              : '给这个分组标一下约束强度：强依据 / 参考 / 背景'
-          "
-          @pointerdown.stop
-          @click.stop="cycleStrength(n)"
-        >
-          {{
-            strengthOf(n)
-              ? CLUSTER_MAP.get(strengthOf(n) as ClusterStrength)?.label
-              : "标强度"
-          }}
-        </button>
         <div class="node-tools">
           <button title="加下一级（Tab）" @pointerdown.stop @click.stop="addChildNote(n.id)">
             ＋子
@@ -5839,28 +5843,36 @@ const numOf = (t: Task) => store.numberOf(t.id);
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--text) 3%, transparent);
 }
-.box-title {
+/* 顶部一整行：名称胶囊 + 强度徽章，用 flex 排，长标题先让位给徽章 */
+.box-head {
   position: absolute;
   top: -12px;
   left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 这一条横带别挡住拖框：只有两个胶囊本身可点 */
+  pointer-events: none;
+}
+.box-head > * {
+  pointer-events: auto;
+}
+.box-title {
+  min-width: 0;
   padding: 2px 10px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
   color: var(--ink, #fff);
-  /* 右边要给强度标签留位，否则长标题会压到标签上 */
-  max-width: calc(100% - 92px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 强度标签：贴在标题条右侧，颜色即语义；没标注时是灰色虚边的「标强度」 */
-/* 强度标签做成「白底彩字」的徽章：标题条本身就是框色，
-   标签再用同色实底会分不清「名字」和「等级」 */
+/* 强度徽章：白底彩字，跟左侧的框色标题条区分开
+   （两个都做成实底同色，就看不出哪个是名字、哪个是等级） */
 .box-cluster {
-  position: absolute;
-  top: -12px;
-  right: 12px;
+  flex: none;
   padding: 1px 8px;
   border: 1px solid transparent;
   border-radius: 999px;
@@ -5879,7 +5891,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
   color: #2f6ac4;
   border-color: #3b7ddd;
 }
-.box-cluster.cs-bg {
+.box-cluster.cs-weak {
   color: #78828f;
   border-color: #98a2b6;
 }
@@ -5889,25 +5901,8 @@ html.dark .box-cluster.cs-strong {
 html.dark .box-cluster.cs-ref {
   color: #8db2f2;
 }
-html.dark .box-cluster.cs-bg {
+html.dark .box-cluster.cs-weak {
   color: #a8b2c0;
-}
-.box-cluster.cs-none {
-  color: var(--text-faint);
-  background: transparent;
-  border: 1px dashed var(--hairline-strong, var(--hairline));
-  font-weight: 500;
-  /* 没标强度的框不打扰视线，悬停或选中时才露出「标强度」 */
-  opacity: 0;
-  transition: opacity 0.15s var(--ease-out);
-}
-.wb-node:hover .box-cluster.cs-none,
-.wb-node.sel .box-cluster.cs-none {
-  opacity: 1;
-}
-.box-cluster.cs-none:hover {
-  color: var(--text-subtle);
-  border-color: var(--text-faint);
 }
 
 /* 拖出分组框时的预览：比框选矩形更像"即将生成的框" */

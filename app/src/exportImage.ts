@@ -58,8 +58,8 @@ export interface ExportNode {
   subColor?: string;
   /** 文档卡片摘要 */
   summary?: string;
-  /** 分组框的约束强度（strong/ref/bg）；空 = 没标 */
-  cluster?: "strong" | "ref" | "bg" | null;
+  /** 分组框的约束强度（strong/ref/weak）；空 = 没标 */
+  cluster?: "strong" | "ref" | "weak" | null;
   /** 任务编号（1、2.1…），画在标题前 */
   seq?: string;
   /** 这个任务用到的资料，画在卡片底部 */
@@ -93,7 +93,9 @@ export interface ExportScene {
 const CLUSTER_STYLE: Record<string, { label: string; color: string }> = {
   strong: { label: "强依据", color: "#d9822b" },
   ref: { label: "参考", color: "#3b7ddd" },
-  bg: { label: "背景", color: "#98a2b6" },
+  weak: { label: "弱参考", color: "#98a2b6" },
+  // 早期存过 "bg"，老项目里可能还有，导出时按弱参考画
+  bg: { label: "弱参考", color: "#98a2b6" },
 };
 
 const FONT = '"Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif';
@@ -365,14 +367,14 @@ function drawNode(ctx: CanvasRenderingContext2D, n: ExportNode) {
     ctx.textAlign = "left";
     ctx.fillText(label, x + 24, y - 12 + barH / 2);
 
-    // 强度胶囊：屏幕上是 .box-cluster，贴右端；导出图里也得有，不然两张对不上
+    // 强度徽章：屏幕上是紧跟在名称右侧的 .box-cluster，导出也放在同一位置
     if (n.cluster) {
       const ci = CLUSTER_STYLE[n.cluster];
       const pfs = Math.max(10, fs - 2);
       ctx.font = `600 ${pfs}px ${font}`;
       const pw = ctx.measureText(ci.label).width + 16;
       const ph = pfs + 8;
-      const px = x + w - 12 - pw;
+      const px = x + 12 + tw + 6;
       const py = y - 12 + (barH - ph) / 2;
       // 白底 + 彩边 + 彩字，跟屏幕上的 .box-cluster 一致
       ctx.fillStyle = "#ffffff";
