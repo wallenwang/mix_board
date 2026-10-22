@@ -593,3 +593,49 @@ html.dark .proj-emoji {
  * ⚠️ `.pane` 的这条写在 App.vue 的 scoped 里（那边有同名规则且特异性更高，
  *    写在这里会被静默吃掉）。
  * ==========================================================================*/
+
+
+/* ------------------------------------------------------------------
+   功能性图标上色
+   同一类功能固定一个色，扫一眼就能认出"这是看板 / 这是甘特 / 这是回收站"。
+   图标只用 stroke: currentColor，所以这里只改 color，不动图标本身。
+   ------------------------------------------------------------------ */
+.view-switch .pane-toggle.iv-kanban svg {
+  color: var(--ic-kanban);
+}
+.view-switch .pane-toggle.iv-whiteboard svg {
+  color: var(--ic-board);
+}
+.view-switch .pane-toggle.iv-write svg {
+  color: var(--ic-doc);
+}
+/* 收起状态压一点，选中状态恢复饱和度，避免整条头部都在抢眼 */
+.view-switch .pane-toggle:not(.on) svg {
+  opacity: 0.8;
+}
+.view-switch .pane-toggle:hover svg {
+  opacity: 1;
+}
+
+.ghost-toggle.float-toggle svg {
+  color: var(--ic-float);
+}
+.ghost-toggle.gantt-chip svg {
+  color: var(--ic-gantt);
+}
+.ghost-toggle.filter-chip svg {
+  color: var(--ic-search);
+}
+.export-btn .app-icon {
+  color: var(--ic-export);
+}
+
+.footer-btn.fb-trash svg {
+  color: var(--ic-trash);
+}
+.footer-btn.fb-theme svg {
+  color: var(--ic-theme);
+}
+.footer-btn.fb-store svg {
+  color: var(--ic-store);
+}

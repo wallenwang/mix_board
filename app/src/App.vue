@@ -605,7 +605,7 @@ watch(
             v-for="k in PANES"
             :key="k"
             class="pane-toggle"
-            :class="{ on: paneOn(k) }"
+            :class="['iv-' + k, { on: paneOn(k) }]"
             :title="
               contentNarrow
                 ? '切到「' + PANE_LABEL[k] + '」'
@@ -752,7 +752,7 @@ watch(
 
                 <div class="tools-spacer"></div>
                 <button
-                  class="ghost-toggle"
+                  class="ghost-toggle gantt-chip"
                   :class="{ on: ganttOpen }"
                   :title="
                     ganttOpen

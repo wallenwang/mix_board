@@ -242,7 +242,7 @@ function startMarquee(e: MouseEvent) {
 const dragOver = ref(false);
 
 function isChrome(t: HTMLElement | null) {
-  return !!t?.closest(".wb-node, .wb-toolbar, .wb-hint, .wb-empty, .wb-mode");
+  return !!t?.closest(".wb-node, .wb-toolbar, .wb-hint, .wb-empty, .wb-mode, .edge-menu");
 }
 
 function bgDown(e: MouseEvent) {
@@ -1548,16 +1548,56 @@ const visibleEdges = computed(() =>
 const edgePick = ref<{ id: number; x: number; y: number } | null>(null);
 
 /** 四种关系。默认分解，其余三种只在真要表达时才动，平时界面是干净的 */
-const EDGE_KIND_META: { kind: EdgeKind; label: string; hint: string }[] = [
-  { kind: "decompose", label: "分解", hint: "A 拆成 B（上下级）" },
-  { kind: "precede", label: "先后", hint: "A 做完才能做 B" },
-  { kind: "evidence", label: "依据", hint: "A 是 B 的材料" },
-  { kind: "produce", label: "产出", hint: "A 是 B 交出来的东西" },
+const EDGE_KIND_META: { kind: EdgeKind; label: string; short: string; hint: string }[] = [
+  {
+    kind: "decompose",
+    label: "父子",
+    short: "父集拆出子集",
+    hint: "父集 → 子集：上面是父集，往下拆出子集；父子关系会决定任务编号",
+  },
+  {
+    kind: "precede",
+    label: "先后",
+    short: "前置完成才轮到",
+    hint: "前置 → 后续：前一项完成，后一项才能开始（时间顺序，不是父子）",
+  },
+  {
+    kind: "evidence",
+    label: "依据",
+    short: "材料支撑任务",
+    hint: "材料 → 任务：这份资料是任务的依据，任务用它做事",
+  },
+  {
+    kind: "produce",
+    label: "产出",
+    short: "任务交出结果",
+    hint: "任务 → 成果：任务是父集，交出来的文档或成果是子集",
+  },
 ];
 
 /** 世界坐标 → 画布内像素（工具条不跟着缩放，所以不能用世界坐标） */
 function worldToScreen(x: number, y: number) {
   return { x: x * zoom.value + panX.value, y: y * zoom.value + panY.value };
+}
+
+/** 菜单贴边处理：靠近右边界就往回收，上方不够高就翻到点击点下面 */
+const edgeMenuEl = ref<HTMLElement | null>(null);
+const edgeMenuFlip = ref(false);
+
+async function placeEdgeMenu() {
+  await nextTick();
+  const el = edgeMenuEl.value;
+  const box = canvasRef.value;
+  const p = edgePick.value;
+  if (!el || !box || !p) return;
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const maxX = box.clientWidth - w / 2 - 10;
+  const minX = w / 2 + 10;
+  const x = Math.min(maxX, Math.max(minX, p.x));
+  if (x !== p.x) edgePick.value = { ...p, x };
+  // 菜单默认浮在点击点上方（translate -100%），上方装不下就翻下来
+  edgeMenuFlip.value = p.y - h - 16 < 6;
 }
 
 function openEdgeMenu(e: BoardEdge, ev: MouseEvent) {
@@ -1567,6 +1607,7 @@ function openEdgeMenu(e: BoardEdge, ev: MouseEvent) {
     x: ev.clientX - (r?.left ?? 0),
     y: ev.clientY - (r?.top ?? 0),
   };
+  void placeEdgeMenu();
 }
 
 const edgeMenuKind = computed<EdgeKind | "">(
@@ -2807,7 +2848,14 @@ async function buildScene() {
   // 连线几何直接用屏幕上那一份：同一条 SVG path（曲线/直线）+ 同一套箭头方向
   const host = canvasRef.value ?? document.documentElement;
   const cs = getComputedStyle(host);
-  const edgeColor = cs.getPropertyValue("--text-faint").trim() || "#a8b3bd";
+  const varOf = (name: string, fallback: string) =>
+    cs.getPropertyValue(name).trim() || fallback;
+  const EDGE_COLOR: Record<string, string> = {
+    decompose: varOf("--edge-parent", "#a8b6c8"),
+    precede: varOf("--edge-order", "#cf8a28"),
+    evidence: varOf("--edge-source", "#2f9e6a"),
+    produce: varOf("--edge-output", "#7a5cc4"),
+  };
   // 线宽跟屏幕上的 .edge-line.k-* 对齐，否则导出图里四种关系会挤成一样粗细
   const EDGE_W: Record<string, number> = {
     decompose: 1.6,
@@ -2822,7 +2870,7 @@ async function buildScene() {
     x2: g.x2,
     y2: g.y2,
     angle: g.angle,
-    color: edgeColor,
+    color: EDGE_COLOR[g.e.kind] ?? EDGE_COLOR.decompose,
     width: EDGE_W[g.e.kind] ?? 1.7,
     kind: g.e.kind,
   }));
@@ -3577,7 +3625,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
             @pointerup="stopEdgeLongPress"
             @pointerleave="stopEdgeLongPress"
           >
-            <AppIcon name="link" :size="17" />
+            <AppIcon name="link" :size="17" class="ico-link" />
           </button>
           <button
             class="tb-caret"
@@ -3608,28 +3656,28 @@ const numOf = (t: Task) => store.numberOf(t.id);
           title="上传资料：PDF / Word / Excel / 图片 / 视频（也可以直接把文件拖进画布）"
           @click="pickFiles"
         >
-          <AppIcon name="upload" :size="17" />
+          <AppIcon name="upload" :size="17" class="ico-upload" />
         </button>
         <button
           class="tb ico"
           title="新建文档：新建一篇 Markdown、放一张文档卡片，右侧「文档」栏同时打开可以直接写"
           @click="addDocNode"
         >
-          <AppIcon name="doc" :size="17" />
+          <AppIcon name="doc" :size="17" class="ico-doc" />
         </button>
         <button
           class="tb ico"
           title="整理布局：把任务树 / 导图树重新排布（Tab 长出来的分支都在内）"
           @click="layoutMind()"
         >
-          <AppIcon name="tree" :size="17" />
+          <AppIcon name="tree" :size="17" class="ico-layout" />
         </button>
         <button
           class="tb ico"
           title="在白板上放一张甘特图（和看板同一批任务，勾完成 / 改日期两边实时联动）"
           @click="addGantt"
         >
-          <AppIcon name="gantt" :size="17" />
+          <AppIcon name="gantt" :size="17" class="ico-gantt" />
         </button>
       </div>
 
@@ -3730,26 +3778,34 @@ const numOf = (t: Task) => store.numberOf(t.id);
     <!-- 连线短菜单：点线才出来，不与常驻 UI 抢位置 -->
     <div
       v-if="edgePick"
+      ref="edgeMenuEl"
       class="edge-menu"
+      :class="{ flip: edgeMenuFlip }"
       :style="{ left: edgePick.x + 'px', top: edgePick.y + 'px' }"
       @pointerdown.stop
+      @mousedown.stop
+      @mouseup.stop
       @click.stop
       @contextmenu.prevent.stop
     >
       <button class="em-del" title="删除这条连线" @click="removeEdgeById">
-        删除
+        <AppIcon name="trash" :size="14" />
+        <span>删除</span>
       </button>
-      <span class="em-sep"></span>
-      <button
-        v-for="m in EDGE_KIND_META"
-        :key="m.kind"
-        class="em-kind"
-        :class="{ on: edgeMenuKind === m.kind }"
-        :title="m.hint"
-        @click="setEdgeKind(m.kind)"
-      >
-        {{ m.label }}
-      </button>
+      <div class="em-grid">
+        <button
+          v-for="m in EDGE_KIND_META"
+          :key="m.kind"
+          class="em-kind"
+          :class="['k-' + m.kind, { on: edgeMenuKind === m.kind }]"
+          :title="m.hint"
+          @click="setEdgeKind(m.kind)"
+        >
+          <i class="em-dot"></i>
+          <b>{{ m.label }}</b>
+          <small>{{ m.short }}</small>
+        </button>
+      </div>
     </div>
 
     <!-- 给 AI 的指令：先看清再复制 -->
@@ -3851,8 +3907,11 @@ const numOf = (t: Task) => store.numberOf(t.id);
       <!-- 连线：两端吸附在卡片边框上，不画进卡片内部；箭头指向下级 -->
       <svg class="wb-edges">
         <defs>
+          <!-- 箭头颜色必须跟着线走：marker 不继承 stroke，只能一种关系一个 -->
           <marker
-            id="wb-arrow"
+            v-for="m in EDGE_KIND_META"
+            :id="'wb-arrow-' + m.kind"
+            :key="m.kind"
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -3860,7 +3919,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
             markerHeight="5.5"
             orient="auto-start-reverse"
           >
-            <path d="M0 0 L10 5 L0 10 z" />
+            <path :class="'mk-' + m.kind" d="M0 0 L10 5 L0 10 z" />
           </marker>
           <marker
             id="wb-arrow-live"
@@ -3879,7 +3938,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
             class="edge-line"
             :class="['k-' + g.e.kind, { picked: edgePick && edgePick.id === g.e.id }]"
             :d="g.d"
-            marker-end="url(#wb-arrow)"
+            :marker-end="'url(#wb-arrow-' + g.e.kind + ')'"
           />
           <path class="edge-hit" :d="g.d" @click.stop="openEdgeMenu(g.e, $event)" />
         </g>
@@ -5035,9 +5094,9 @@ const numOf = (t: Task) => store.numberOf(t.id);
   position: absolute;
   z-index: 40;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px;
+  align-items: stretch;
+  gap: 5px;
+  padding: 5px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   border: 1px solid var(--hairline);
@@ -5046,36 +5105,91 @@ const numOf = (t: Task) => store.numberOf(t.id);
   transform: translate(-50%, calc(-100% - 8px));
   white-space: nowrap;
 }
+.edge-menu.flip {
+  transform: translate(-50%, 12px);
+}
 .edge-menu button {
-  padding: 3px 8px;
   border: none;
-  border-radius: 5px;
   background: transparent;
   color: var(--text);
-  font-size: 12px;
-  line-height: 18px;
   cursor: pointer;
 }
 .edge-menu button:hover {
   background: var(--fill-weak, rgb(0 0 0 / 6%));
 }
+/* 删除：最左一条竖排，警告色，和关系项拉开 */
 .edge-menu .em-del {
-  color: #c45656;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 44px;
+  border-radius: 7px;
+  background: rgb(220 83 70 / 9%);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1;
   font-weight: 600;
 }
 .edge-menu .em-del:hover {
-  background: rgb(196 86 86 / 12%);
+  background: rgb(220 83 70 / 18%);
 }
-.edge-menu .em-sep {
-  width: 1px;
-  height: 16px;
-  margin: 0 3px;
-  background: var(--hairline);
+/* 四种关系两列两行：比一字排开窄一半，也不至于竖成长条 */
+.edge-menu .em-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+/* 关系项：左边一个色点，右边两行（关系名 + 一句话说明） */
+.edge-menu .em-kind {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  align-items: center;
+  padding: 4px 8px 4px 7px;
+  border-radius: 6px;
+  text-align: left;
+}
+.edge-menu .em-dot {
+  grid-row: 1 / span 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--edge-parent);
+}
+.edge-menu .em-kind b {
+  font-size: 12.5px;
+  line-height: 16px;
+  font-weight: 600;
+}
+.edge-menu .em-kind small {
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--text-faint);
+}
+.edge-menu .em-kind.k-decompose .em-dot {
+  background: var(--edge-parent);
+}
+.edge-menu .em-kind.k-precede .em-dot {
+  background: var(--edge-order);
+}
+.edge-menu .em-kind.k-evidence .em-dot {
+  background: var(--edge-source);
+}
+.edge-menu .em-kind.k-produce .em-dot {
+  background: var(--edge-output);
 }
 .edge-menu .em-kind.on {
-  background: var(--accent-weak, rgb(64 158 255 / 14%));
+  background: var(--accent-soft);
+}
+.edge-menu .em-kind.on b {
   color: var(--accent);
-  font-weight: 600;
+}
+.edge-menu .em-kind.on small {
+  color: var(--accent);
+  opacity: 0.75;
 }
 
 .wb-edges {
@@ -5094,27 +5208,61 @@ const numOf = (t: Task) => store.numberOf(t.id);
 #wb-arrow-live path {
   fill: var(--accent);
 }
+/* 工具栏图标按含义上色：绿=内容、紫=结构、琥珀=时间、蓝=连接。
+   只改图标颜色，按钮的底色和选中态都不动，避免整条工具栏变花。 */
+.tb .app-icon.ico-upload,
+.tb .app-icon.ico-doc {
+  color: var(--ic-doc);
+}
+.tb .app-icon.ico-layout {
+  color: var(--ic-board);
+}
+.tb .app-icon.ico-gantt {
+  color: var(--ic-gantt);
+}
+.tb .app-icon.ico-link {
+  color: var(--ic-kanban);
+}
+
 .edge-line {
   fill: none;
   stroke: var(--text-faint);
   stroke-width: 1.7;
   stroke-linecap: round;
 }
-/* 四种关系靠线型区分，不额外加颜色 —— 线一多，颜色最先失控 */
+/* 四种关系：线型 + 一种克制的颜色。只给四种语义上色，别的地方保持中性，
+   否则画布上一片彩线反而看不出重点 */
 .edge-line.k-decompose {
+  stroke: var(--edge-parent);
   stroke-width: 1.6;
 }
 .edge-line.k-precede {
-  stroke-width: 2.4;
+  stroke: var(--edge-order);
+  stroke-width: 2.2;
 }
 .edge-line.k-evidence {
+  stroke: var(--edge-source);
   stroke-width: 1.8;
   stroke-dasharray: 1 5;
   stroke-linecap: round;
 }
 .edge-line.k-produce {
-  stroke-width: 3.4;
-  opacity: 0.6;
+  stroke: var(--edge-output);
+  stroke-width: 3;
+  opacity: 0.62;
+}
+/* 箭头 fill 跟着关系走 */
+.mk-decompose {
+  fill: var(--edge-parent);
+}
+.mk-precede {
+  fill: var(--edge-order);
+}
+.mk-evidence {
+  fill: var(--edge-source);
+}
+.mk-produce {
+  fill: var(--edge-output);
 }
 /* 点中的那条线：亮一档，配合菜单指示"改的是它" */
 .edge-line.picked {

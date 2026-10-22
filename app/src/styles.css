@@ -52,6 +52,25 @@
   --warn: #cf8a28;
   --danger: #dc5346;
 
+  /* 关系色：只给白板四种连线用。别的地方一律中性，
+     否则画布上全是彩线，反而看不出重点是哪种关系 */
+  --edge-parent: #a4b0c2;
+  --edge-order: #cf8a28;
+  --edge-source: #2f9e6a;
+  --edge-output: #7a5cc4;
+
+  /* 图标色：同一种功能固定一个色，工具栏不再是一排灰线 */
+  --ic-kanban: #3b7ddd;
+  --ic-board: #7d5cc6;
+  --ic-doc: #2f8a72;
+  --ic-float: #4a86b8;
+  --ic-gantt: #bc8327;
+  --ic-trash: #cf5f56;
+  --ic-theme: #8a6fd4;
+  --ic-store: #3f7fbf;
+  --ic-search: #6f8199;
+  --ic-export: #b8763f;
+
   /* 圆角 */
   --radius-xs: 5px;
   --radius-sm: 7px;
@@ -127,6 +146,23 @@ html.dark {
   --ok: #45c98d;
   --warn: #e5ab58;
   --danger: #f4837a;
+
+  /* 暗色下同一批色要提亮，否则在 #151a24 上糊成一团 */
+  --edge-parent: #8b98ac;
+  --edge-order: #e2b263;
+  --edge-source: #5cc3a2;
+  --edge-output: #b39aec;
+
+  --ic-kanban: #7fa6ff;
+  --ic-board: #b39aec;
+  --ic-doc: #5cc3a2;
+  --ic-float: #7fb2dd;
+  --ic-gantt: #e2b263;
+  --ic-trash: #ef8a80;
+  --ic-theme: #b39aec;
+  --ic-store: #7fb2dd;
+  --ic-search: #9aa5b7;
+  --ic-export: #d79a63;
 
   /* 暗色里用"亮发丝环"代替黑投影来勾卡片轮廓 */
   --shadow-ring: 0 0 0 1px rgba(255, 255, 255, 0.065);

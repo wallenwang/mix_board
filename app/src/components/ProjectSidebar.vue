@@ -169,15 +169,15 @@ function toggleTheme() {
     </div>
 
     <div class="sidebar-footer">
-      <button class="footer-btn" @click="emit('open-trash')">
+      <button class="footer-btn fb-trash" @click="emit('open-trash')">
         <AppIcon name="trash" :size="15" />
         回收站
       </button>
-      <button class="footer-btn" @click="toggleTheme">
+      <button class="footer-btn fb-theme" @click="toggleTheme">
         <AppIcon :name="store.theme === 'dark' ? 'sun' : 'moon'" :size="15" />
         {{ store.theme === "dark" ? "浅色模式" : "深色模式" }}
       </button>
-      <button class="footer-btn" @click="openDataPanel">
+      <button class="footer-btn fb-store" @click="openDataPanel">
         <AppIcon name="folder" :size="15" />
         数据存储
       </button>
