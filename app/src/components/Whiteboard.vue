@@ -45,6 +45,7 @@ import {
   type ExportLine,
 } from "../exportImage";
 import { reportError } from "../diag";
+import { buildTaskPrompt, copyText, type PromptRef, type PromptNeighbor } from "../aiPrompt";
 
 const store = useBoardStore();
 const canvasRef = ref<HTMLElement | null>(null);
@@ -1582,6 +1583,75 @@ async function dropRef(taskId: number, noteId: number) {
     await store.dropRef(taskId, noteId);
   } catch (e) {
     reportError("移除依据", e);
+  }
+}
+
+// ---- 给 AI 的指令 ----
+
+/** 预览弹窗：先让人看清生成了什么，再复制 */
+const aiDialog = ref(false);
+const aiText = ref("");
+const aiTitle = ref("");
+
+function promptRefsOf(taskId: number): PromptRef[] {
+  return store.refsOfTask(taskId).map((r) => {
+    const n = store.notes.find((x) => x.id === r.note_id);
+    const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+    return { label: noteLabel(r.note_id), level: r.level, fileName: f?.name };
+  });
+}
+
+/** 上下游只看任务之间的连线；资料连过来的依据不算上下游 */
+function promptNeighborsOf(taskId: number) {
+  const upstream: PromptNeighbor[] = [];
+  const downstream: PromptNeighbor[] = [];
+  for (const e of store.edges) {
+    if (e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
+      const up = taskById(e.from_id);
+      if (up) {
+        upstream.push({
+          label: up.title,
+          seq: up.seq,
+          kind: e.kind,
+          done: !!up.completed_at,
+        });
+      }
+    }
+    if (e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
+      const dn = taskById(e.to_id);
+      if (dn) downstream.push({ label: dn.title, seq: dn.seq, kind: e.kind });
+    }
+  }
+  return { upstream, downstream };
+}
+
+function taskPromptText(t: Task): string {
+  const { upstream, downstream } = promptNeighborsOf(t.id);
+  return buildTaskPrompt({
+    projectName: store.currentProject?.name ?? "（未命名项目）",
+    taskTitle: t.title,
+    taskSeq: t.seq,
+    columnName: colName(t),
+    description: t.description,
+    refs: promptRefsOf(t.id),
+    upstream,
+    downstream,
+  });
+}
+
+function openAiPrompt(t: Task) {
+  aiText.value = taskPromptText(t);
+  aiTitle.value = `给 AI 的指令 · T${t.seq} ${t.title}`;
+  aiDialog.value = true;
+}
+
+async function doCopyAi() {
+  const ok = await copyText(aiText.value);
+  if (ok) {
+    ElMessage.success("已复制，直接粘到对话框里");
+    aiDialog.value = false;
+  } else {
+    ElMessage.warning("复制没成功，请在上面框里手动全选复制");
   }
 }
 
@@ -3618,6 +3688,18 @@ function prio(t: Task) {
       </button>
     </div>
 
+    <!-- 给 AI 的指令：先看清再复制 -->
+    <el-dialog v-model="aiDialog" :title="aiTitle" width="660px" append-to-body>
+      <div class="ai-tip">
+        下面这段直接粘给 AI 就行。改了任务说明或资料等级，重新点一次会自动更新。
+      </div>
+      <textarea class="ai-text" readonly :value="aiText"></textarea>
+      <template #footer>
+        <el-button @click="aiDialog = false">关闭</el-button>
+        <el-button type="primary" @click="doCopyAi">复制这段</el-button>
+      </template>
+    </el-dialog>
+
     <div class="wb-content" :style="contentStyle">
       <!-- 框选矩形 -->
       <div v-if="marquee" class="wb-marquee" :style="marqueeStyle"></div>
@@ -3858,6 +3940,14 @@ function prio(t: Task) {
             @click.stop="startEditTaskFull(t)"
           >
             ✎ 编辑
+          </button>
+          <button
+            class="tb-ai"
+            title="复制成给 AI 的指令（自动带上任务说明、资料等级、上下游）"
+            @pointerdown.stop
+            @click.stop="openAiPrompt(t)"
+          >
+            AI
           </button>
           <button title="打开完整任务详情" @pointerdown.stop @click.stop="openTask(t.id)">
             详情
@@ -5464,6 +5554,12 @@ function prio(t: Task) {
 .node-tools button:hover {
   background: var(--accent-soft);
   color: var(--accent);
+}
+/* 「AI」是这一排里唯一主动去找它才点的按钮，给它一点分量 */
+.node-tools button.tb-ai {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 .node-tools button.on {
   background: var(--accent-soft);
