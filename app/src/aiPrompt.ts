@@ -358,6 +358,11 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   const seq = store.numberOf(taskId);
   const out: string[] = [];
   const gaps: string[] = [];
+  // 段落号动态生成：没有白板关联内容时「三、任务关系」后面直接是「四、交付物」，
+  // 不会出现三跳到五
+  const CN = ["一", "二", "三", "四", "五", "六", "七", "八"];
+  let sec = 0;
+  const head = (title: string) => out.push(`${CN[sec++]}、${title}`);
 
   /* 标题与任务标识 */
   out.push(`【任务 T${seq} · ${t.title}】`);
@@ -372,7 +377,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   out.push("");
 
   /* 一、任务要求 */
-  out.push("一、任务要求");
+  head("任务要求");
   const desc = (t.description || "").trim();
   if (desc) out.push(desc);
   else {
@@ -383,7 +388,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
 
   /* 二、参考材料 */
   const refs = collectRefs(store, taskId);
-  out.push("二、参考材料");
+  head("参考材料");
   if (!refs.length) {
     out.push("（本任务尚未关联任何资料。）");
     gaps.push("未关联任何资料，缺少工作依据");
@@ -452,7 +457,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     posLines.push(`- 下级任务：T${c.seq} ${c.title}${extra}${pts}`);
   }
   if (posLines.length) {
-    out.push("三、任务关系");
+    head("任务关系");
     out.push(...posLines);
     out.push("");
   }
@@ -460,7 +465,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 四、白板关联内容：思维导图、便签、文字节点，都是本任务要用到的参数 */
   const boards = links.boardLinks.filter((b) => b.text);
   if (boards.length) {
-    out.push("四、白板关联内容");
+    head("白板关联内容");
     out.push("本任务在白板上关联的节点如下，均为工作输入的一部分：");
     for (const b of boards) {
       const name = BOARD_KIND_NAME[b.kind] || "节点";
@@ -474,7 +479,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 五、交付物 */
   const fmt = (t.deliver_fmt || "").trim().toLowerCase();
   const fmtName = DELIVER_NAME[fmt] || "";
-  out.push("五、交付物");
+  head("交付物");
   if (links.outputs.length) {
     for (const o of links.outputs) out.push(`- ${o}`);
   } else {
@@ -484,7 +489,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   out.push("");
 
   /* 六、输出要求 */
-  out.push("六、输出要求");
+  head("输出要求");
   let n = 1;
   out.push(`${n++}. 结论先行：直接给出交付内容，不复述任务背景，结尾不询问是否继续`);
   if (refs.some((r) => r.level === 0)) {
@@ -506,7 +511,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 六、信息缺口 */
   if (!fmtName) gaps.push("未指定交付格式");
   if (gaps.length) {
-    out.push("七、信息缺口");
+    head("信息缺口");
     out.push("以下内容尚未确定，可能影响交付质量：");
     for (const g of gaps) out.push(`- ${g}`);
     out.push("");

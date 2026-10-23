@@ -1,5 +1,17 @@
 // Browser-only fallback so the UI can be tested in a plain browser (no Tauri).
 // In the real desktop app, Tauri IS present and this file is never used.
+import {
+  DEMO_PROJECT_NAME,
+  SEED_COUNTERS,
+  seedColumns,
+  seedDocs,
+  seedEdges,
+  seedNotes,
+  seedProject,
+  seedTaskRefs,
+  seedTasks,
+  seedAssets,
+} from "./seedDemo";
 import type {
   Project,
   Column,
@@ -737,6 +749,33 @@ loadState();
     if (n.role === undefined) n.role = "";
     if (n.group_kind === undefined) n.group_kind = "";
   }
+})();
+
+// 预置项目：山茶间 · 品牌视觉体系。
+// 空白看板说明不了任何问题，所以浏览器预览模式下自带一个跑完整流程的项目，
+// 用来检验「给 AI 的指令」能不能把关系说清楚。已经存在同名项目就不重复注入。
+(function injectDemoProject() {
+  if (projects.some((x) => x.name === DEMO_PROJECT_NAME)) return;
+  projects.push({ ...seedProject });
+  columns.push(...seedColumns.map((c) => ({ ...c })));
+  tasks.push(...seedTasks.map((x) => ({ ...x })));
+  notes.push(...seedNotes.map((x) => ({ ...x })));
+  edges.push(...seedEdges.map((x) => ({ ...x })));
+  taskRefs.push(...seedTaskRefs.map((x) => ({ ...x })));
+  docs.push(...seedDocs.map((x) => ({ ...x })));
+  const assets = ((window as any).__mockAssets ||= []);
+  assets.push(...seedAssets.map((x) => ({ ...x })));
+
+  // 计数器抬到预置数据之上，否则新建的东西会覆盖它们
+  pid = Math.max(pid, SEED_COUNTERS.pid);
+  cid = Math.max(cid, SEED_COUNTERS.cid);
+  tid = Math.max(tid, SEED_COUNTERS.tid);
+  gid = Math.max(gid, SEED_COUNTERS.gid);
+  nid = Math.max(nid, SEED_COUNTERS.nid);
+  eid = Math.max(eid, SEED_COUNTERS.eid);
+  did = Math.max(did, SEED_COUNTERS.did);
+  rid = Math.max(rid, SEED_COUNTERS.rid);
+  saveState();
 })();
 
 /** 清空浏览器本地数据（想重置时用） */
