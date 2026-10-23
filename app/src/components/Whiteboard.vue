@@ -4130,14 +4130,14 @@ const numOf = (t: Task) => store.numberOf(t.id);
         v-model="refPoint"
         class="rm-point"
         rows="3"
-        placeholder="这份材料里，这个任务必须照着做的是什么？例如：主色限墨绿系，禁止高饱和红（第 12 页）"
+        placeholder="这份材料里，这个任务该重点看哪儿？例如：第 12 页的颜色规范最关键；主色限墨绿，禁止高饱和红"
         @keydown.stop
       ></textarea>
       <div class="rm-foot">
         <button class="rm-del" title="把这份资料从这个任务上移除" @click="removeRefFromMenu">
           移除
         </button>
-        <span class="rm-tip">AI 读不到文件，只认这段字</span>
+        <span class="rm-tip">写清楚看哪儿，文件本身要一并传给 AI</span>
         <button class="rm-save" @click="saveRefPoint">保存</button>
       </div>
     </div>

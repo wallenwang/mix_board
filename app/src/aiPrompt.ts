@@ -12,6 +12,11 @@
  *   - 上一环节 / 下一环节 / 父子 → board_edges(kind)
  *   - 要交什么                  → produce 边指向的文档或资料节点
  *
+ * ⚠️ 这段话不搬运材料内容。多模态模型能直接读 PDF / 图片，把文件一并拖过去就行；
+ * 这段话要做的是「移交材料清单」——哪几个文件、各自多硬、重点在哪儿、冲突时听谁的。
+ * 所以要点（point）的定位是导航和约束，不是内容替身：
+ *   200 页的规范书，让 AI 知道只看第 12 页，比把第 12 页抄一遍更稳。
+ *
  * 三档等级不写数值权重：AI 拿到 0.7 不知道该干什么，拿到「冲突时以它为准」
  * 才知道怎么做。这也是为什么等级挂在关系上（同一份资料对不同任务可以不同档）。
  */
@@ -283,6 +288,12 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     out.push("（这个任务还没有挂任何资料。）");
     gaps.push("任务上没有挂资料，AI 没有任何依据");
   } else {
+    // 这句是整段话里最要紧的一句：不写它，使用者会以为光靠下面这些条目就够了，
+    // 而 AI 其实一个文件也没看到。
+    out.push(
+      `（下面 ${refs.length} 个文件要一并传给我，直接看原文件就行。` +
+        `这几句说的是「它们各自多硬、该重点看哪儿」，不是文件内容本身。）`
+    );
     for (const lv of [0, 1, 2]) {
       const list = refs.filter((r) => r.level === lv);
       if (!list.length) continue;
@@ -305,13 +316,13 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
         }」。以任务里的定级为准。）`
       );
     }
-    // 只给了文件名、没给要点 = AI 拿不到内容，这会直接决定它答得准不准
+    // 没写要点 = AI 拿到文件却不知道看哪儿。文件能让它读，但重点得人点。
     const noPoint = refs.filter((r) => !r.point);
     if (noPoint.length) {
       gaps.push(
-        `${noPoint.length} 份材料还没写要点（${noPoint
+        `${noPoint.length} 份材料还没说重点（${noPoint
           .map((r) => r.label)
-          .join("、")}）。我只给了文件名，AI 读不到里面的内容`
+          .join("、")}）。文件传过去它会读，但不点出重点，它容易抓错地方`
       );
     }
   }
@@ -371,7 +382,8 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   }
   out.push("- 用到哪份材料，就在那句后面注明它的名字");
   if (refs.some((r) => r.point)) {
-    out.push("- 材料我写了要点，按要点来；要点没覆盖到的地方，说出来别自己补");
+    out.push("- 我写的「要点」只是帮你定位重点，不是文件内容的替代；具体以文件为准");
+    out.push("- 要点和文件对不上时，以文件为准，并告诉我哪里对不上");
   }
   out.push("");
 

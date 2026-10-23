@@ -27,12 +27,12 @@ function refreshHint() {
 <template>
   <el-dialog v-model="aiPromptOpen" :title="aiPromptTitle" width="720px" append-to-body>
     <div class="ai-tip">
-      下面这段直接粘给 AI 就行。材料按「重要依据 / 参考 / 弱参考」分好了，
-      产出物和上下游也是从白板上读的。
+      把下面这段直接粘给 AI，然后把清单里列的文件一并拖过去（它读不到你硬盘上的文件）。
+      材料按「必须遵守 / 可以参考 / 仅作背景」分好了，产出物和上下游也是从白板上读的。
     </div>
     <textarea class="ai-text" readonly :value="aiPromptText"></textarea>
     <div class="ai-foot">
-      <span>内容来自这个任务本身：说明、材料等级、所在分区、上下游、产出物。</span>
+      <span>内容来自这个任务本身：说明、材料等级、重点、上下游、产出物。文件要另外拖给 AI。</span>
       <button class="ai-link" @click="refreshHint">为什么不是固定的？</button>
     </div>
     <template #footer>
