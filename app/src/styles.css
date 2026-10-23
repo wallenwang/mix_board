@@ -1322,3 +1322,33 @@ html.dark .view-switch .pane-toggle.on {
 .el-overlay-dialog:has(.ai-dialog) .el-dialog {
   pointer-events: auto;
 }
+
+/* ---------- 连线菜单的等级行：支撑类关系（父子/依据）才显示 ---------- */
+.em-levels {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--hairline-strong);
+}
+.em-lv {
+  flex: 1;
+  padding: 3px 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-subtle);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.em-lv:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.em-lv.on {
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg-elevated);
+  font-weight: 600;
+}

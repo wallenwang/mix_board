@@ -559,7 +559,7 @@ function nodesInBox(box: BoardNote): string[] {
   return out;
 }
 
-function startDrag(e: PointerEvent, kind: "task" | "note", id: number) {
+async function startDrag(e: PointerEvent, kind: "task" | "note", id: number) {
   if (e.button !== 0) return;
   if ((e.target as HTMLElement).closest("textarea, input, button, .node-port, .node-resize"))
     return;
@@ -571,7 +571,36 @@ function startDrag(e: PointerEvent, kind: "task" | "note", id: number) {
     return;
   }
 
-  if (e.shiftKey || e.ctrlKey || e.metaKey) toggleSelect(kind, id);
+  // Shift + 拖动便签/资料 = 复制一份再拖走。
+  // 复制体共享同一份数据（file_id 相同），只是白板上多一个位置 ——
+  // 这样同一个资料可以摆两处、分别放进不同强度的框里。
+  // 任务卡不参与复制（任务是唯一实体，复制会造成两个 T1）。
+  if (e.shiftKey && kind === "note" && !isSelected(kind, id)) {
+    const src = noteById(id);
+    if (src && store.currentProjectId != null) {
+      try {
+        const nid = await api.createNote({
+          project_id: src.project_id,
+          x: src.x + 24,
+          y: src.y + 24,
+          text: src.text,
+          color: src.color,
+          kind: src.kind,
+          w: src.w,
+          h: src.h,
+          file_id: src.file_id,
+          meta: src.meta,
+        });
+        await store.refreshBoard();
+        // 拖的是新副本，原节点留在原地
+        id = nid;
+        selectOnly("note", nid);
+        ElMessage.info("已复制一份（数据仍指向同一份资料）");
+      } catch (err) {
+        reportError("复制节点", err);
+      }
+    }
+  } else if (e.ctrlKey || e.metaKey) toggleSelect(kind, id);
   else if (!isSelected(kind, id)) selectOnly(kind, id);
 
   // 实际被拖的是「选中的节点」+「它们的所有后代」
@@ -1922,6 +1951,60 @@ async function setEdgeKind(kind: EdgeKind) {
     await store.refreshBoard();
   } catch (e) {
     reportError("改连线类型", e);
+  }
+}
+
+/**
+ * 支撑类关系的等级（强依据 / 参考 / 弱参考）。
+ *
+ * 「所有支撑都有等级」：子任务是父任务的依据、资料是任务的依据，
+ * 两者都按这三档来。同一个资料连到两个任务，两条线可以各是各的档。
+ *
+ * 存储位置按关系类型分开：
+ * - 依据（资料→任务）：task_refs.level（还带关注重点）
+ * - 分解（子→父）：board_edges.strength
+ */
+const LEVEL_META = [
+  { v: 0, label: "强依据", hint: "不得违反；冲突时以它为准" },
+  { v: 1, label: "参考", hint: "可用于补充，不构成强制要求" },
+  { v: 2, label: "弱参考", hint: "仅供理解语境，不作论据" },
+];
+
+/** 这条边算不算「支撑」（有等级可调） */
+function isSupportEdge(): boolean {
+  const k = edgeMenuKind.value;
+  return k === "decompose" || k === "evidence";
+}
+
+/** 读当前等级：依据查 task_refs，分解查 strength */
+function edgeLevel(): number {
+  const cur = edgePick.value;
+  if (!cur) return 1;
+  const e = store.edges.find((x) => x.id === cur.id);
+  if (!e) return 1;
+  if (e.kind === "evidence") {
+    const r = store.refsOfTask(e.to_id).find((x) => x.note_id === e.from_id);
+    return r ? r.level : 1;
+  }
+  return e.strength ?? 0;
+}
+
+async function setEdgeLevel(level: number) {
+  const cur = edgePick.value;
+  if (!cur) return;
+  const e = store.edges.find((x) => x.id === cur.id);
+  if (!e) return;
+  try {
+    if (e.kind === "evidence") {
+      // 依据：等级记在关系上（task_refs），同一份资料对不同任务可以不同档
+      await api.setTaskRef(store.currentProjectId!, e.to_id, e.from_id, level);
+    } else {
+      // 分解：子任务对父任务的重要程度记在边上
+      await api.updateEdge(e.id, { strength: level });
+    }
+    await store.refreshBoard();
+  } catch (err) {
+    reportError("改依据等级", err);
   }
 }
 
@@ -4127,6 +4210,19 @@ const numOf = (t: Task) => store.numberOf(t.id);
           <i class="em-dot"></i>
           <b>{{ m.label }}</b>
           <small>{{ m.short }}</small>
+        </button>
+      </div>
+      <!-- 支撑类关系可以调等级：同一个资料连两个任务，两条线各是各的档 -->
+      <div v-if="isSupportEdge()" class="em-levels">
+        <button
+          v-for="l in LEVEL_META"
+          :key="l.v"
+          class="em-lv"
+          :class="{ on: edgeLevel() === l.v }"
+          :title="l.hint"
+          @click="setEdgeLevel(l.v)"
+        >
+          {{ l.label }}
         </button>
       </div>
     </div>
