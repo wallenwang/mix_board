@@ -497,31 +497,36 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   for (const p of links.next) {
     posLines.push(`- 后续任务：T${p.seq} ${p.title}（待本任务完成后启动）`);
   }
-  for (const c of links.children) {
-    const extra = c.desc ? `：${c.desc.split("\n")[0].slice(0, 60)}` : "";
-    const pts = c.points ? `（已标注 ${c.points} 项关注重点）` : "";
-    posLines.push(`- 下级任务：T${c.seq} ${c.title}${extra}${pts}`);
-  }
+  // 下级任务不在这里列 —— 后面「下级任务的支撑」有完整版（任务 + 产出 + 依据）
   if (posLines.length) {
     head("任务关系");
     out.push(...posLines);
     out.push("");
   }
 
-  // 下级任务挂的资料：父任务本身往往不直接挂材料，但它要俯瞰全局。
-  // 分开放而不是并进上面的三档，是为了分清「本任务直接用的」和「下级在用的」。
-  const childRefRows: string[] = [];
+  // 下级任务 = 本任务的支撑单元：每个子任务带着它的产出和依据。
+  // 父任务本身往往不直接挂材料，但它要俯瞰全局 ——
+  // 子任务的产出就是父任务的依据，这跟「资料支撑任务」是同一套逻辑。
+  const childRows: string[] = [];
   for (const c of links.children) {
-    for (const r of c.refs) {
-      const lv = r.level === 0 ? "强制约束" : r.level === 1 ? "参考依据" : "背景资料";
-      const pt = r.point ? `\n     关注重点：${r.point}` : "";
-      childRefRows.push(`- T${c.seq} ${c.title} ← ${r.label}（${lv}）${pt}`);
+    const lines: string[] = [`- T${c.seq} ${c.title}${c.done ? "（已完成）" : "（进行中）"}`];
+    if (c.desc) lines.push(`   任务：${c.desc.split("\n")[0].slice(0, 60)}`);
+    if (c.outputs.length) {
+      lines.push(`   产出：${c.outputs.join("、")}`);
     }
+    if (c.refs.length) {
+      const parts = c.refs.map((r) => {
+        const lv = r.level === 0 ? "强制约束" : r.level === 1 ? "参考依据" : "背景资料";
+        return r.point ? `${r.label}（${lv}）：${r.point}` : `${r.label}（${lv}）`;
+      });
+      lines.push(`   依据：${parts.join("；")}`);
+    }
+    childRows.push(lines.join("\n"));
   }
-  if (childRefRows.length) {
-    head("下级任务的参考材料");
-    out.push("以下资料由下级任务直接使用，供整体把握时参考：");
-    out.push(...childRefRows);
+  if (childRows.length) {
+    head("下级任务的支撑");
+    out.push("以下子任务的成果构成本任务的组成部分，其产出与依据一并列出：");
+    out.push(...childRows);
     out.push("");
   }
 
@@ -602,10 +607,12 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   if (!fmtName) gaps.push("未指定交付格式");
   // 没挂外部资料不一定就是缺口：如果上游有产出，工作依据在上一环里
   if (!refs.length) {
-    if (links.prev.some((p) => p.outputs.length)) {
-      /* 有上游产出，不算缺口 */
-    } else {
-      gaps.push("未关联任何资料，且上游任务也没有产出，缺少工作依据");
+    // 有上游产出或下级支撑就不算缺口 —— 工作依据在链条里，不在外部文件上
+    const covered =
+      links.prev.some((p) => p.outputs.length) ||
+      links.children.some((c) => c.outputs.length || c.refs.length);
+    if (!covered) {
+      gaps.push("未关联任何资料，上下游也没有成果，缺少工作依据");
     }
   }
   if (gaps.length) {

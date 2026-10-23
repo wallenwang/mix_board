@@ -1678,14 +1678,15 @@ async function connect(
     await api.createEdge(store.currentProjectId, a.kind, a.id, b.kind, b.id, autoKind);
     if (autoKind === "evidence") {
       // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、弱参考→仅作背景。
-      // 没放进任何分组（或框上没标强度）就按「可以参考」。任务卡上仍可随时改档。
+      // 没放进任何分组就按「必须遵守」—— 无框默认强，宁可过严再调低，
+      // 反过来漏掉硬约束的代价更大。任务卡上仍可随时改档。
       const src = noteById(from.id);
       const st = src ? clusterOfNote(src) : null;
       await api.setTaskRef(
         store.currentProjectId,
         to.id,
         from.id,
-        st ? CLUSTER_LEVEL[st] : 1
+        st ? CLUSTER_LEVEL[st] : 0
       );
     }
     await store.refreshBoard();
