@@ -150,8 +150,14 @@ export function layoutTree(
   edges: TreeEdge[],
   gapX = 250,
   gapY = 28,
-  nodeH = 72
+  nodeH = 72,
+  heightOf?: (key: string) => number
 ): Map<string, TreePos> {
+  // 每个节点按自己的实际高度排：任务卡比便签高，写死一个高度必然交叠
+  const hOf = (k: string) => {
+    const h = heightOf ? heightOf(k) : nodeH;
+    return h > 16 ? h : nodeH;
+  };
   const set = new Set(keys);
   const kids = new Map<string, string[]>();
   const hasParent = new Set<string>();
@@ -174,15 +180,16 @@ export function layoutTree(
     if (seen.has(key)) return 0;
     seen.add(key);
     const cs = (kids.get(key) ?? []).filter((k) => !seen.has(k));
+    const h = hOf(key);
     let cy: number;
     if (cs.length === 0) {
-      cy = cursor + nodeH / 2;
-      cursor += nodeH + gapY;
+      cy = cursor + h / 2;
+      cursor += h + gapY;
     } else {
       const ys = cs.map((k) => walk(k, depth + 1));
       cy = (Math.min(...ys) + Math.max(...ys)) / 2;
     }
-    pos.set(key, { x: depth * gapX, y: cy - nodeH / 2 });
+    pos.set(key, { x: depth * gapX, y: cy - h / 2 });
     return cy;
   };
 
@@ -192,7 +199,7 @@ export function layoutTree(
   for (const k of keys) {
     if (!pos.has(k)) {
       pos.set(k, { x: 0, y: cursor });
-      cursor += nodeH + gapY;
+      cursor += hOf(k) + gapY;
     }
   }
   return pos;

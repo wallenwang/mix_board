@@ -1877,30 +1877,35 @@ const visibleEdges = computed(() =>
 const edgePick = ref<{ id: number; x: number; y: number } | null>(null);
 
 /** 四种关系。默认分解，其余三种只在真要表达时才动，平时界面是干净的 */
-const EDGE_KIND_META: { kind: EdgeKind; label: string; short: string; hint: string }[] = [
+// 「支撑」把父子与依据合成一组：子集就是父集的依据，强弱在下面的等级行调，
+// 不再让用户在「父子 / 依据」之间做区分（那是存储层的事，不是心智模型里的事）。
+const EDGE_KIND_META: {
+  key: string;
+  kinds: EdgeKind[];
+  label: string;
+  short: string;
+  hint: string;
+}[] = [
   {
-    kind: "decompose",
-    label: "父子",
-    short: "父集拆出子集",
-    hint: "父集 → 子集：上面是父集，往下拆出子集；父子关系会决定任务编号",
+    key: "support",
+    kinds: ["decompose", "evidence"],
+    label: "支撑",
+    short: "下级或材料支撑",
+    hint: "下级支撑上级、材料支撑任务；强弱用下面三档调",
   },
   {
-    kind: "precede",
+    key: "precede",
+    kinds: ["precede"],
     label: "先后",
     short: "前置完成才轮到",
-    hint: "前置 → 后续：前一项完成，后一项才能开始（时间顺序，不是父子）",
+    hint: "前置 → 后续：前一项完成，后一项才能开始（时间顺序）",
   },
   {
-    kind: "evidence",
-    label: "依据",
-    short: "材料支撑任务",
-    hint: "材料 → 任务：这份资料是任务的依据，任务用它做事",
-  },
-  {
-    kind: "produce",
+    key: "produce",
+    kinds: ["produce"],
     label: "产出",
     short: "任务交出结果",
-    hint: "任务 → 成果：任务是父集，交出来的文档或成果是子集",
+    hint: "任务 → 成果：这一步交出来的文档或成果",
   },
 ];
 
@@ -1943,14 +1948,24 @@ const edgeMenuKind = computed<EdgeKind | "">(
   () => store.edges.find((e) => e.id === edgePick.value?.id)?.kind ?? ""
 );
 
-async function setEdgeKind(kind: EdgeKind) {
+/**
+ * 菜单里点「支撑 / 先后 / 产出」。
+ * 「支撑」在存储层有两种：材料→任务记为依据（含关注重点），下级→上级记为分解（撑结构）。
+ * 选哪一种由端点决定，用户不需要关心。
+ */
+async function pickEdgeKind(m: { key: string; kinds: EdgeKind[] }) {
   const cur = edgePick.value;
   if (!cur) return;
+  const e = store.edges.find((x) => x.id === cur.id);
+  let kind: EdgeKind = m.kinds[0];
+  if (m.key === "support") {
+    kind = e && e.from_kind === "note" && e.to_kind === "task" ? "evidence" : "decompose";
+  }
   try {
     await api.updateEdge(cur.id, { kind });
     await store.refreshBoard();
-  } catch (e) {
-    reportError("改连线类型", e);
+  } catch (e2) {
+    reportError("改连线类型", e2);
   }
 }
 
@@ -2272,16 +2287,8 @@ async function ensureMindRoot() {
   return id != null ? noteById(id) ?? null : null;
 }
 
-// ---- 整理：任务树 + 导图树一起排 ----
+// ---- 整理：任务树 + 导图树一起排（资料/便签保持用户摆的位置） ----
 const mindCount = computed(() => store.notes.filter((n) => n.kind === "mind").length);
-
-/** 会被布局吸收的挂靠节点：导图分支 + 上传的资料（便签/分组框保持用户摆的位置） */
-function absorbable(key: string) {
-  const { kind, id } = parseKey(key);
-  if (kind !== "note") return false;
-  const n = noteById(id);
-  return !!n && (n.kind === "mind" || n.kind === "file");
-}
 
 async function layoutMind(silent = false) {
   const keys: string[] = [];
@@ -2291,8 +2298,15 @@ async function layoutMind(silent = false) {
     keys.push(k);
     inSet.add(k);
   }
+  // 浮动的导图节点（没有分解边）保持用户摆的位置，只有连进树里的才参与重排
+  const decomposeIds = new Set<number>();
+  for (const e of store.edges) {
+    if (e.kind !== "decompose") continue;
+    if (e.from_kind === "note") decomposeIds.add(e.from_id);
+    if (e.to_kind === "note") decomposeIds.add(e.to_id);
+  }
   for (const n of store.notes) {
-    if (n.kind !== "mind") continue;
+    if (n.kind !== "mind" || !decomposeIds.has(n.id)) continue;
     const k = keyOf("note", n.id);
     keys.push(k);
     inSet.add(k);
@@ -2301,30 +2315,30 @@ async function layoutMind(silent = false) {
     ElMessage.warning("白板上还没有任务或导图节点");
     return;
   }
-  const allEdges = store.edges.map((e) => ({
-    from: keyOf(e.from_kind, e.from_id),
-    to: keyOf(e.to_kind, e.to_id),
-  }));
-  // 把挂在树上的资料卡片也吸进来一起排
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const e of allEdges) {
-      if (inSet.has(e.from) && !inSet.has(e.to) && absorbable(e.to)) {
-        inSet.add(e.to);
-        keys.push(e.to);
-        grew = true;
-      } else if (inSet.has(e.to) && !inSet.has(e.from) && absorbable(e.from)) {
-        inSet.add(e.from);
-        keys.push(e.from);
-        grew = true;
-      }
-    }
-  }
+  // ⚠️ 只有「分解」边定义树（from 是子、to 是父）。
+  // 先后/依据/产出混进来会把树整个排反：先后边 T1→T2 会被读成「T2 是 T1 的父级」，
+  // 排完 T4 跑到最左、T1 在最右，整张图变成从右往左读。
+  const treeEdges = store.edges
+    .filter((e) => e.kind === "decompose")
+    .map((e) => ({ from: keyOf(e.from_kind, e.from_id), to: keyOf(e.to_kind, e.to_id) }))
+    .filter((e) => inSet.has(e.from) && inSet.has(e.to));
 
-  const treeEdges = allEdges.filter((e) => inSet.has(e.from) && inSet.has(e.to));
-  const pos = layoutTree(keys, treeEdges, 250, 28, 72);
-  const roots = keys.filter((k) => !treeEdges.some((e) => e.to === k));
+  // 资料 / 便签不吸进来：它们是独立摆放的（资料在左、结论在侧），整理布局只动任务树与导图树
+  const heightOf = (k: string) => {
+    const { kind, id } = parseKey(k);
+    if (kind === "task") {
+      // 任务卡高度跟内容走（标题/说明行数），从 DOM 取实际值，取不到给个保守值
+      const el = document.querySelector(
+        `[data-node-kind="task"][data-node-id="${id}"]`
+      ) as HTMLElement | null;
+      return el && el.offsetHeight > 20 ? el.offsetHeight : 150;
+    }
+    const n = noteById(id);
+    return n ? noteSize(n).h : 72;
+  };
+  const pos = layoutTree(keys, treeEdges, 340, 46, 118, heightOf);
+  // 树根 = 没有父级的节点（子 → 父方向下，「谁是 from」谁就是子）
+  const roots = keys.filter((k) => !treeEdges.some((e) => e.from === k));
   const anchorKey = roots[0] ?? keys[0];
   const base = pos.get(anchorKey);
   if (!base) return;
@@ -4194,23 +4208,25 @@ const numOf = (t: Task) => store.numberOf(t.id);
       @click.stop
       @contextmenu.prevent.stop
     >
-      <button class="em-del" title="删除这条连线" @click="removeEdgeById">
-        <AppIcon name="trash" :size="14" />
-        <span>删除</span>
-      </button>
-      <div class="em-grid">
-        <button
-          v-for="m in EDGE_KIND_META"
-          :key="m.kind"
-          class="em-kind"
-          :class="['k-' + m.kind, { on: edgeMenuKind === m.kind }]"
-          :title="m.hint"
-          @click="setEdgeKind(m.kind)"
-        >
-          <i class="em-dot"></i>
-          <b>{{ m.label }}</b>
-          <small>{{ m.short }}</small>
+      <div class="em-row">
+        <button class="em-del" title="删除这条连线" @click="removeEdgeById">
+          <AppIcon name="trash" :size="14" />
+          <span>删除</span>
         </button>
+        <div class="em-grid">
+          <button
+            v-for="m in EDGE_KIND_META"
+            :key="m.key"
+            class="em-kind"
+            :class="{ on: m.kinds.includes(edgeMenuKind) }"
+            :title="m.hint"
+            @click="pickEdgeKind(m)"
+          >
+            <i class="em-dot" :class="'k-' + (m.kinds.includes(edgeMenuKind) ? edgeMenuKind : m.kinds[0])"></i>
+            <b>{{ m.label }}</b>
+            <small>{{ m.short }}</small>
+          </button>
+        </div>
       </div>
       <!-- 支撑类关系可以调等级：同一个资料连两个任务，两条线各是各的档 -->
       <div v-if="isSupportEdge()" class="em-levels">
@@ -5561,8 +5577,8 @@ const numOf = (t: Task) => store.numberOf(t.id);
   position: absolute;
   z-index: 40;
   display: flex;
-  align-items: stretch;
-  gap: 5px;
+  flex-direction: column;
+  gap: 0;
   padding: 5px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
@@ -5584,6 +5600,12 @@ const numOf = (t: Task) => store.numberOf(t.id);
 .edge-menu button:hover {
   background: var(--fill-weak, rgb(0 0 0 / 6%));
 }
+/* 第一行：删除 + 三种关系；第二行（.em-levels）是等级，必须另起一行 */
+.edge-menu .em-row {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+}
 /* 删除：最左一条竖排，警告色，和关系项拉开 */
 .edge-menu .em-del {
   display: flex;
@@ -5602,10 +5624,10 @@ const numOf = (t: Task) => store.numberOf(t.id);
 .edge-menu .em-del:hover {
   background: rgb(220 83 70 / 18%);
 }
-/* 四种关系两列两行：比一字排开窄一半，也不至于竖成长条 */
+/* 三种关系一行排开 */
 .edge-menu .em-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 2px;
 }
 /* 关系项：左边一个色点，右边两行（关系名 + 一句话说明） */
@@ -5636,16 +5658,16 @@ const numOf = (t: Task) => store.numberOf(t.id);
   line-height: 13px;
   color: var(--text-faint);
 }
-.edge-menu .em-kind.k-decompose .em-dot {
+.edge-menu .em-dot.k-decompose {
   background: var(--edge-parent);
 }
-.edge-menu .em-kind.k-precede .em-dot {
+.edge-menu .em-dot.k-precede {
   background: var(--edge-order);
 }
-.edge-menu .em-kind.k-evidence .em-dot {
+.edge-menu .em-dot.k-evidence {
   background: var(--edge-source);
 }
-.edge-menu .em-kind.k-produce .em-dot {
+.edge-menu .em-dot.k-produce {
   background: var(--edge-output);
 }
 .edge-menu .em-kind.on {
