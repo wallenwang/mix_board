@@ -269,14 +269,14 @@ function collectLinks(store: PromptStore, taskId: number) {
 
   for (const e of store.edges) {
     const kind = e.kind || "decompose";
-    // 所属任务：别人 → 我（父子，本任务是它的一部分）
-    if (kind === "decompose" && e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
-      const t = atFrom(e);
-      if (t) parentRow = asNeighbor(t);
-    }
-    // 下级任务：我 → 别人（父子，本任务拆出的子项）
+    // 所属任务：我 → 别人（分解边方向是子 → 父，所以我指向的是上级）
     if (kind === "decompose" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
       const t = atTo(e);
+      if (t) parentRow = asNeighbor(t);
+    }
+    // 下级任务：别人 → 我（它们是子级，指向本任务）
+    if (kind === "decompose" && e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
+      const t = atFrom(e);
       if (t) children.push(asNeighbor(t));
     }
     // 前置任务：前置 → 我（必须等它完成）

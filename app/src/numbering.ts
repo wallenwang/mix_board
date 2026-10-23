@@ -14,7 +14,12 @@
 
 import type { Task, BoardEdge } from "./types";
 
-/** 只有"分解"边表达父子归属；先后、依据、产出都不改变层级 */
+/**
+ * 只有"分解"边表达父子归属；先后、依据、产出都不改变层级。
+ *
+ * ⚠️ 方向是**子 → 父**（from 是子、to 是父）：箭头指向被支撑的一方，
+ * 跟依据（资料→任务）、先后（前置→后续）、产出（任务→产出物）保持同一套语义。
+ */
 function isParentEdge(e: BoardEdge, ids: Set<number>): boolean {
   return (
     e.kind === "decompose" &&
@@ -37,12 +42,13 @@ export function computeTaskNumbers(tasks: Task[], edges: BoardEdge[]): Map<numbe
   const ids = new Set(tasks.map((t) => t.id));
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
-  // 一个任务只能有一个上级，多条分解边时取第一条，避免编号打架
+  // 一个任务只能有一个上级，多条分解边时取第一条，避免编号打架。
+  // 边的方向是子 → 父，所以 from 的上级是 to。
   const parent = new Map<number, number>();
   for (const e of edges) {
     if (!isParentEdge(e, ids)) continue;
-    if (parent.has(e.to_id)) continue;
-    parent.set(e.to_id, e.from_id);
+    if (parent.has(e.from_id)) continue;
+    parent.set(e.from_id, e.to_id);
   }
 
   // 环保护：顺着上级往上走，走回自己就把这条边断掉。

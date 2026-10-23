@@ -1631,17 +1631,26 @@ async function connect(
   );
   // 资料 → 任务：这是"这个任务用这份材料"，也就是依据关系。
   // 其余情况按默认的分解走，用户点连线菜单可以改。
+  //
+  // ⚠️ 分解边的方向是**子 → 父**：from 是子级、to 是上级。
+  // 箭头指向被支撑的一方，跟依据（资料→任务）、先后（前置→后续）一致。
+  // 用户的操作方向仍是「先拖上级、再拖下级」，建边时反过来存。
   const autoKind: EdgeKind =
     from.kind === "note" && toKind === "task" ? "evidence" : "decompose";
+  // 依据边：from 是资料、to 是任务，方向不用改。
+  // 分解边：from 是上级、to 是下级，但库里存的是「子 → 父」，要对调。
+  const flip = autoKind === "decompose";
+  const a = flip ? { kind: toKind, id: to.id } : { kind: from.kind, id: from.id };
+  const b = flip ? { kind: from.kind, id: from.id } : { kind: toKind, id: to.id };
   try {
     if (rev) {
       await api.deleteEdge(rev.id);
-      await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
+      await api.createEdge(store.currentProjectId, a.kind, a.id, b.kind, b.id, autoKind);
       if (autoKind === "evidence") {
         await api.setTaskRef(store.currentProjectId, to.id, from.id, 1);
       }
       await store.refreshBoard();
-      ElMessage.success("已反转上下级方向（先点的是上级）");
+      ElMessage.success("已反转上下级方向（箭头指向被支撑的一方）");
       return;
     }
     // 会绕成圈：to 已经是 from 的上级，就不能再把 from 挂到它下面
@@ -1649,7 +1658,7 @@ async function connect(
       ElMessage.warning("这两个卡片已经在同一条上下级链上了，再连会绕成圈");
       return;
     }
-    await api.createEdge(store.currentProjectId, from.kind, from.id, toKind, to.id, autoKind);
+    await api.createEdge(store.currentProjectId, a.kind, a.id, b.kind, b.id, autoKind);
     if (autoKind === "evidence") {
       // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、弱参考→仅作背景。
       // 没放进任何分组（或框上没标强度）就按「可以参考」。任务卡上仍可随时改档。
@@ -1674,7 +1683,7 @@ async function connect(
 async function handleLinkClick(kind: "task" | "note", id: number) {
   if (!linkFrom.value) {
     linkFrom.value = { kind, id };
-    ElMessage.info("已选中【上级】，再点它的【下级】卡片");
+    ElMessage.info("已选中【上级】，再点它的【下级】卡片（箭头会从下级指向上级）");
     return;
   }
   const from = linkFrom.value;
@@ -2075,7 +2084,8 @@ async function addChildTask(parentId: number) {
       title: "新子任务",
       priority: p.priority,
     });
-    await api.createEdge(store.currentProjectId, "task", parentId, "task", nid);
+    // 分解边方向：子 → 父（箭头指向被支撑的一方）
+    await api.createEdge(store.currentProjectId, "task", nid, "task", parentId);
     await store.refreshTasks();
     // 必须把连线也刷进 store，否则紧接着的「加同级」找不到父节点
     await store.refreshBoard();
@@ -2084,8 +2094,9 @@ async function addChildTask(parentId: number) {
       undo: () => api.deleteTask(nid).then(() => store.refreshTasks()),
       redo: () => api.restoreTask(nid).then(() => store.refreshTasks()),
     });
+    // 边方向是子 → 父，所以父的子级是「to_id = 父」的那些边的 from
     const kids = store.edges.filter(
-      (e) => e.from_kind === "task" && e.from_id === parentId && e.to_kind === "task"
+      (e) => e.from_kind === "task" && e.to_id === parentId && e.to_kind === "task"
     ).length;
     const pos = posOf("task", parentId);
     const np = { x: pos.x + 260, y: pos.y + Math.max(0, kids - 1) * TASK_H + 8 };
@@ -2137,12 +2148,13 @@ async function addChildNote(parentId: number) {
   const p = noteById(parentId);
   if (!p) return;
   const kids = store.edges.filter(
-    (e) => e.from_kind === "note" && e.from_id === parentId && e.to_kind === "note"
+    (e) => e.from_kind === "note" && e.to_id === parentId && e.to_kind === "note"
   ).length;
   const id = await createNode("mind", p.x + 250, p.y + kids * 62, { edit: false });
   if (id == null || store.currentProjectId == null) return;
   try {
-    await api.createEdge(store.currentProjectId, "note", parentId, "note", id);
+    // 导图父子同样子 → 父，跟任务树的箭头方向保持一致
+    await api.createEdge(store.currentProjectId, "note", id, "note", parentId);
     await store.refreshBoard();
     const n = noteById(id);
     if (n) await startEditNote(n);

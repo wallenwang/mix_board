@@ -251,23 +251,25 @@ function edge(id: number, from: [string, number], to: [string, number], kind: Bo
 }
 
 export const seedEdges: BoardEdge[] = [
-  // 父子：阶段拆任务、任务拆子项
-  edge(1, ["task", T(1)], ["task", T(11)], "decompose"),
-  edge(2, ["task", T(1)], ["task", T(12)], "decompose"),
-  edge(3, ["task", T(1)], ["task", T(13)], "decompose"),
-  edge(4, ["task", T(2)], ["task", T(21)], "decompose"),
-  edge(5, ["task", T(2)], ["task", T(22)], "decompose"),
-  edge(6, ["task", T(2)], ["task", T(23)], "decompose"),
-  edge(7, ["task", T(2)], ["task", T(24)], "decompose"),
-  edge(8, ["task", T(21)], ["task", T(211)], "decompose"),
-  edge(9, ["task", T(21)], ["task", T(212)], "decompose"),
-  edge(10, ["task", T(22)], ["task", T(221)], "decompose"),
-  edge(11, ["task", T(22)], ["task", T(222)], "decompose"),
-  edge(12, ["task", T(3)], ["task", T(31)], "decompose"),
-  edge(13, ["task", T(3)], ["task", T(32)], "decompose"),
-  edge(14, ["task", T(3)], ["task", T(33)], "decompose"),
-  edge(15, ["task", T(4)], ["task", T(41)], "decompose"),
-  edge(16, ["task", T(4)], ["task", T(42)], "decompose"),
+  // 父子：阶段拆任务、任务拆子项。
+  // ⚠️ 分解边方向是**子 → 父**（箭头指向被支撑的一方），
+  // 跟依据（资料→任务）、先后（前置→后续）、产出（任务→产出物）保持同一套语义。
+  edge(1, ["task", T(11)], ["task", T(1)], "decompose"),
+  edge(2, ["task", T(12)], ["task", T(1)], "decompose"),
+  edge(3, ["task", T(13)], ["task", T(1)], "decompose"),
+  edge(4, ["task", T(21)], ["task", T(2)], "decompose"),
+  edge(5, ["task", T(22)], ["task", T(2)], "decompose"),
+  edge(6, ["task", T(23)], ["task", T(2)], "decompose"),
+  edge(7, ["task", T(24)], ["task", T(2)], "decompose"),
+  edge(8, ["task", T(211)], ["task", T(21)], "decompose"),
+  edge(9, ["task", T(212)], ["task", T(21)], "decompose"),
+  edge(10, ["task", T(221)], ["task", T(22)], "decompose"),
+  edge(11, ["task", T(222)], ["task", T(22)], "decompose"),
+  edge(12, ["task", T(31)], ["task", T(3)], "decompose"),
+  edge(13, ["task", T(32)], ["task", T(3)], "decompose"),
+  edge(14, ["task", T(33)], ["task", T(3)], "decompose"),
+  edge(15, ["task", T(41)], ["task", T(4)], "decompose"),
+  edge(16, ["task", T(42)], ["task", T(4)], "decompose"),
 
   // 先后：阶段间 + 关键依赖
   edge(17, ["task", T(1)], ["task", T(2)], "precede"),
