@@ -403,6 +403,18 @@ export const useBoardStore = defineStore("board", () => {
     }
   }
 
+  /** 指定交付格式（word/pdf/ppt/md/html/sheet），传 "" 表示取消指定 */
+  async function setDeliverFmt(id: number, fmt: string) {
+    const t = allTasks.value.find((x) => x.id === id);
+    if (!t) return;
+    rebuildByCol(patchTaskEverywhere({ ...t, deliver_fmt: fmt } as Task));
+    try {
+      await api.updateTask(id, { deliver_fmt: fmt });
+    } catch (e) {
+      reportError("设置交付格式", e);
+    }
+  }
+
   /** 手动指定甘特条颜色（null = 恢复按截止日期紧迫度自动配色） */
   async function setBarColor(id: number, color: string | null) {
     const t = allTasks.value.find((x) => x.id === id);
@@ -453,7 +465,7 @@ export const useBoardStore = defineStore("board", () => {
     filterSearch, filterPriority, filterTags, hasFilter, matchFilter, totalTaskCount,
     allTasks, tagOf, fileById, sortedCol, visibleCount,
     taskParentOf, taskDepth, taskDescendants, taskChildCount,
-    toggleDone, setDates, setProgress, setBarColor, colProgress, projectProgress, overdueTasks,
+    toggleDone, setDates, setProgress, setBarColor, setDeliverFmt, colProgress, projectProgress, overdueTasks,
     taskNumbers, numberOf,
     taskRefs, refsOfTask, tasksUsingNote, refLevelOf, setRef, dropRef,
     loadBootstrap, loadProject, refreshTasks, refreshColumns, refreshProjects, refreshBoard,

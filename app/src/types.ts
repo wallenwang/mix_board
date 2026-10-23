@@ -47,6 +47,8 @@ export interface Task {
   wy: number | null;
   /** 项目内编号（T1、T2…）。删除后不回收，0 表示尚未编号 */
   seq: number;
+  /** 交付格式（word/pdf/ppt/md/html），空 = 未指定。只影响给 AI 的指令怎么写输出要求 */
+  deliver_fmt: string;
 }
 
 /** 白板节点类型：便签 / 文本 / 思维导图 / 上传资料 / 分组框 / 甘特图 / 文档 */

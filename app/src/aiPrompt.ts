@@ -43,10 +43,23 @@ export interface PromptStore {
 export const aiPromptOpen = ref(false);
 export const aiPromptText = ref("");
 export const aiPromptTitle = ref("");
+/** 当前打开的是哪个任务（弹窗里改交付格式要写回它） */
+export const aiPromptTaskId = ref<number | null>(null);
+
+/** 交付格式选项：弹窗里的那排按钮和指令里的输出要求都读这一份 */
+export const DELIVER_OPTIONS = [
+  { key: "word", label: "Word", desc: "文档，带标题层级" },
+  { key: "pdf", label: "PDF", desc: "可打印的文档版式" },
+  { key: "ppt", label: "PPT", desc: "一页一个标题加要点" },
+  { key: "md", label: "Markdown", desc: "结构化纯文本" },
+  { key: "html", label: "HTML", desc: "自包含网页" },
+  { key: "sheet", label: "表格", desc: "一行一条记录" },
+] as const;
 
 export function openPrompt(store: PromptStore, taskId: number) {
   const t = store.allTasks.find((x) => x.id === taskId);
   if (!t) return;
+  aiPromptTaskId.value = taskId;
   aiPromptText.value = buildTaskPrompt(store, taskId);
   aiPromptTitle.value = `给 AI 的指令 · T${store.numberOf(taskId)} ${t.title}`;
   aiPromptOpen.value = true;
@@ -171,13 +184,10 @@ function refLine(r: RefRow): string {
   } else if (r.isDoc) {
     bits.push("站内文档");
   }
-  if (r.cluster) {
-    bits.push(`来自分区「${r.cluster.name}」，标为${CLUSTER_LABEL[r.cluster.key]}`);
-  }
-  const tail = bits.length ? ` ｜ ${bits.join(" · ")}` : "";
-  // 要点另起一行：这是材料里真正的内容，混在文件名后面会被 AI 当装饰忽略
-  const pointLine = r.point ? `\n  要点：${r.point}` : "";
-  return `- ${r.label}${tail}${pointLine}`;
+  if (r.cluster) bits.push(`分区「${r.cluster.name}」· ${CLUSTER_LABEL[r.cluster.key]}`);
+  const head = bits.length ? `${r.label}（${bits.join("；")}）` : r.label;
+  // 关注重点另起一行：混在文件名后面会被当装饰忽略
+  return r.point ? `${head}\n   关注重点：${r.point}` : head;
 }
 
 /* ---------------- 关系 ---------------- */
@@ -244,11 +254,48 @@ function dueLine(t: Task): string {
   if (!t.due_date) return "";
   const d = new Date(t.due_date + "T23:59:59");
   const days = Math.ceil((d.getTime() - Date.now()) / 86400000);
-  if (Number.isNaN(days)) return `截止 ${t.due_date.slice(0, 10)}`;
-  if (days < 0) return `截止 ${t.due_date.slice(0, 10)}（已过 ${-days} 天）`;
-  if (days === 0) return `截止 ${t.due_date.slice(0, 10)}（今天）`;
-  return `截止 ${t.due_date.slice(0, 10)}（还剩 ${days} 天）`;
+  if (Number.isNaN(days)) return `交付截止 ${t.due_date.slice(0, 10)}`;
+  if (days < 0) return `交付截止 ${t.due_date.slice(0, 10)}（已逾期 ${-days} 天）`;
+  if (days === 0) return `交付截止 ${t.due_date.slice(0, 10)}（今日）`;
+  return `交付截止 ${t.due_date.slice(0, 10)}（剩余 ${days} 天）`;
 }
+
+/** 各交付格式对应的输出要求，写的是「产出物长什么样」，不是工具操作说明 */
+const DELIVER_RULES: Record<string, string[]> = {
+  word: [
+    "输出完整可用的 Word 文档正文，不要输出提纲、占位符或待补充标记",
+    "使用规范的标题层级（一级标题、二级标题），不要用 Markdown 井号",
+  ],
+  pdf: [
+    "输出可直接打印成 PDF 的完整正文，不要输出提纲或占位符",
+    "版面按 A4 纵向考虑，标题层级清晰，段落长度适中",
+  ],
+  ppt: [
+    "按演示文稿的组织方式输出：每页一个明确的标题，配 3 至 5 条要点",
+    "每页要点要能独立成句，不要出现「详见上文」这类指代",
+  ],
+  md: [
+    "输出结构化的 Markdown 文本，使用标题层级组织内容",
+    "不要输出 HTML 标签",
+  ],
+  html: [
+    "输出单个自包含的 HTML 文件，样式内嵌，不依赖外部资源",
+    "正文语义化排版（标题、列表、表格各归其位），不要用空白字符对齐",
+  ],
+  sheet: [
+    "输出表格：列名明确、一行一条记录，不要合并单元格",
+    "用 Markdown 表格给出，若列数超过 6 列则拆成多张表",
+  ],
+};
+
+const DELIVER_NAME: Record<string, string> = {
+  word: "Word 文档",
+  pdf: "PDF 文档",
+  ppt: "PPT 演示文稿",
+  md: "Markdown 文本",
+  html: "HTML 网页",
+  sheet: "表格",
+};
 
 export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   const t = store.allTasks.find((x) => x.id === taskId);
@@ -258,50 +305,53 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   const out: string[] = [];
   const gaps: string[] = [];
 
-  out.push(`【T${seq} ${t.title}】${store.currentProject?.name ?? "未命名项目"}`);
+  /* 标题与任务标识 */
+  out.push(`【任务 T${seq} · ${t.title}】`);
+  out.push(`项目：${store.currentProject?.name ?? "未命名项目"}`);
+  const metaBits: string[] = [];
+  const col = store.columns.find((c) => c.id === t.column_id);
+  if (col) metaBits.push(`所属阶段 ${col.name}`);
+  const due = dueLine(t);
+  if (due) metaBits.push(due);
+  if (t.completed_at) metaBits.push("状态 已完成");
+  if (metaBits.length) out.push(metaBits.join("　｜　"));
   out.push("");
 
-  /* 一、要做什么 */
-  out.push("一、这次要你做什么");
+  /* 一、任务要求 */
+  out.push("一、任务要求");
   const desc = (t.description || "").trim();
   if (desc) out.push(desc);
   else {
-    out.push("（这个任务还没写说明。）");
-    gaps.push("任务说明是空的，AI 只能靠标题猜");
-  }
-  const metaBits: string[] = [];
-  const col = store.columns.find((c) => c.id === t.column_id);
-  if (col) metaBits.push(`阶段：${col.name}`);
-  const due = dueLine(t);
-  if (due) metaBits.push(due);
-  if (t.completed_at) metaBits.push("状态：已完成");
-  if (metaBits.length) {
-    out.push("");
-    out.push(metaBits.join(" ｜ "));
+    out.push("（本任务尚未填写任务说明。）");
+    gaps.push("任务说明为空，只能依据标题推断工作内容");
   }
   out.push("");
 
-  /* 二、材料 */
+  /* 二、参考材料 */
   const refs = collectRefs(store, taskId);
-  out.push("二、手上的材料（按能不能违背分类）");
+  out.push("二、参考材料");
   if (!refs.length) {
-    out.push("（这个任务还没有挂任何资料。）");
-    gaps.push("任务上没有挂资料，AI 没有任何依据");
+    out.push("（本任务尚未关联任何资料。）");
+    gaps.push("未关联任何资料，缺少工作依据");
   } else {
-    // 这句是整段话里最要紧的一句：不写它，使用者会以为光靠下面这些条目就够了，
-    // 而 AI 其实一个文件也没看到。
     out.push(
-      `（下面 ${refs.length} 个文件要一并传给我，直接看原文件就行。` +
-        `这几句说的是「它们各自多硬、该重点看哪儿」，不是文件内容本身。）`
+      `下列 ${refs.length} 份资料随本指令一并提供，请直接查阅原文件。` +
+        `以下条目说明各份资料的约束层级与关注重点，不替代文件内容。`
     );
+    out.push("当资料之间、或资料与本指令发生冲突时，按约束层级高者执行。");
+    const TITLES = [
+      "【强制约束】不得违反；与本指令冲突时以资料为准",
+      "【参考依据】可用于补充完善，不构成强制要求",
+      "【背景资料】仅供理解语境，不得作为论据引用",
+    ];
     for (const lv of [0, 1, 2]) {
       const list = refs.filter((r) => r.level === lv);
       if (!list.length) continue;
       out.push("");
-      out.push(`【${LEVEL_TITLE[lv]}】${list.length} 份`);
-      for (const r of list) out.push(refLine(r));
+      out.push(`${TITLES[lv]}　${list.length} 份`);
+      list.forEach((r, i) => out.push(`${i + 1}. ${refLine(r)}`));
     }
-    // 框上的强度跟任务里定的不一样时点一句，避免 AI 看到两边冲突
+    // 分区标注与任务定级不一致时点明，避免 AI 面对两个来源无所适从
     const mismatch = refs.find(
       (r) =>
         r.cluster &&
@@ -311,84 +361,80 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     if (mismatch && mismatch.cluster) {
       out.push("");
       out.push(
-        `（注：资料所在分区标的是「${CLUSTER_LABEL[mismatch.cluster.key]}」，而这个任务里定的是「${
-          LEVEL_TITLE[mismatch.level]?.split("（")[0]
-        }」。以任务里的定级为准。）`
+        `说明：上述某份资料在白板分区中标为「${CLUSTER_LABEL[mismatch.cluster.key]}」，` +
+          `而在本任务中定级为「${LEVEL_TITLE[mismatch.level]?.split("（")[0]}」。以本任务的定级为准。`
       );
     }
-    // 没写要点 = AI 拿到文件却不知道看哪儿。文件能让它读，但重点得人点。
+    // 未标注关注重点 = AI 拿到文件却不知道往哪儿看
     const noPoint = refs.filter((r) => !r.point);
     if (noPoint.length) {
       gaps.push(
-        `${noPoint.length} 份材料还没说重点（${noPoint
-          .map((r) => r.label)
-          .join("、")}）。文件传过去它会读，但不点出重点，它容易抓错地方`
+        `${noPoint.length} 份资料未标注关注重点（${noPoint.map((r) => r.label).join("、")}）；` +
+          `文件虽可查阅，但篇幅较长，未标注易导致抓取错位`
       );
     }
   }
   out.push("");
 
-  /* 三、位置 */
+  /* 三、任务关系 */
   const links = collectLinks(store, taskId);
   const posLines: string[] = [];
-  if (links.parent) {
-    posLines.push(`- 所属上级：T${links.parent.seq} ${links.parent.title}`);
+  if (links.parent) posLines.push(`- 所属上级：T${links.parent.seq} ${links.parent.title}`);
+  for (const p of links.prev) {
+    posLines.push(
+      `- 上游任务：T${p.seq} ${p.title}${p.done ? "（已完成）" : "（进行中，其结论可能变动）"}`
+    );
   }
-  if (links.prev.length) {
-    for (const p of links.prev) {
-      posLines.push(
-        `- 上一个环节：T${p.seq} ${p.title}${p.done ? "（已完成）" : "（还没做完，它的结论之后可能变）"}`
-      );
-    }
-  }
-  if (links.next.length) {
-    for (const p of links.next) {
-      posLines.push(`- 下一个环节：T${p.seq} ${p.title}（要等我这边做完）`);
-    }
+  for (const p of links.next) {
+    posLines.push(`- 下游任务：T${p.seq} ${p.title}（待本任务完成后启动）`);
   }
   if (links.children.length) {
     const names = links.children.map((c) => `T${c.seq} ${c.title}`).join("、");
-    posLines.push(`- 这件事拆成了：${names}`);
+    posLines.push(`- 下级任务：${names}`);
   }
   if (posLines.length) {
-    out.push("三、这件事在项目里的位置");
+    out.push("三、任务关系");
     out.push(...posLines);
     out.push("");
   }
 
-  /* 四、产出 */
-  out.push("四、要交出来的东西");
+  /* 四、交付物 */
+  const fmt = (t.deliver_fmt || "").trim().toLowerCase();
+  const fmtName = DELIVER_NAME[fmt] || "";
+  out.push("四、交付物");
   if (links.outputs.length) {
     for (const o of links.outputs) out.push(`- ${o}`);
-    out.push("（直接给能用的内容，不要给提纲。）");
   } else {
-    out.push("（这个任务还没挂产出物。请按「一、这次要你做什么」里的要求产出，");
-    out.push("  并在第一句话说明你交了什么。）");
-    gaps.push("任务上没挂产出物，AI 只能自己判断该交什么");
+    out.push("- 按「一、任务要求」所述内容交付，并在开头说明本次交付的具体成果");
   }
+  if (fmtName) out.push(`- 交付格式：${fmtName}`);
   out.push("");
 
-  /* 五、交付要求 */
-  out.push("五、交付要求");
-  out.push("- 直接给结论，不要复述这个任务，也不要在结尾问我要不要继续");
+  /* 五、输出要求 */
+  out.push("五、输出要求");
+  let n = 1;
+  out.push(`${n++}. 结论先行：直接给出交付内容，不复述任务背景，结尾不询问是否继续`);
   if (refs.some((r) => r.level === 0)) {
-    out.push("- 「重要依据」里写的内容不得违背；与我说的有冲突时，以材料为准并指出来");
+    out.push(`${n++}. 「强制约束」不得违反；与本指令存在冲突时，以资料为准并明确指出`);
   }
   if (refs.some((r) => r.level === 2)) {
-    out.push("- 「弱参考」只用来理解语境，不要引用其中的说法");
+    out.push(`${n++}. 「背景资料」仅供理解语境，不得作为论据引用`);
   }
   if (refs.length >= 2) {
-    out.push("- 两份材料说法不一致时，先把冲突说清楚，不要自己挑一个圆过去");
+    out.push(`${n++}. 资料之间表述不一致时，先说明冲突所在，不得自行取舍`);
   }
-  out.push("- 用到哪份材料，就在那句后面注明它的名字");
+  out.push(`${n++}. 引用资料内容时注明出处`);
   if (refs.some((r) => r.point)) {
-    out.push("- 我写的「要点」只是帮你定位重点，不是文件内容的替代；具体以文件为准");
-    out.push("- 要点和文件对不上时，以文件为准，并告诉我哪里对不上");
+    out.push(`${n++}. 「关注重点」仅用于定位，以原文为准；标注与原文不符时请指出`);
   }
+  for (const r of DELIVER_RULES[fmt] || []) out.push(`${n++}. ${r}`);
   out.push("");
 
+  /* 六、信息缺口 */
+  if (!fmtName) gaps.push("未指定交付格式");
   if (gaps.length) {
-    out.push("六、这份任务还缺");
+    out.push("六、信息缺口");
+    out.push("以下内容尚未确定，可能影响交付质量：");
     for (const g of gaps) out.push(`- ${g}`);
     out.push("");
   }

@@ -11,6 +11,28 @@ const store = useBoardStore();
 const hintDismissed = ref(false);
 
 const boardRef = ref<HTMLElement | null>(null);
+const viewportRef = ref<HTMLElement | null>(null);
+
+/** 看板缩放倍率（0.5 ~ 1.6）。Ctrl+滚轮调整，跟白板的缩放习惯一致 */
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 1.6;
+const ZOOM_KEY = "kanban.boardZoom";
+const zoom = ref<number>(
+  Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(localStorage.getItem(ZOOM_KEY)) || 1))
+);
+function setZoom(v: number) {
+  zoom.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(v * 100) / 100));
+  localStorage.setItem(ZOOM_KEY, String(zoom.value));
+  scheduleMeasure();
+}
+function onWheel(e: WheelEvent) {
+  // 只拦 Ctrl+滚轮；普通滚轮留给横向滚动，不然看板就滚不动了
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const step = e.deltaY > 0 ? -0.08 : 0.08;
+  setZoom(zoom.value + step);
+}
+
 /** 看板窄到每列不足 ~175px 时切成紧凑样式，保证一屏能看全 */
 const compact = ref(false);
 /** 再窄（每列不足 ~118px，比如全景布局里）切「超紧凑」：只留标题，其余元素收起 */
@@ -21,8 +43,10 @@ let rafId = 0;
 function measure() {
   const w = boardRef.value?.clientWidth ?? 0;
   if (!w) return;
+  // clientWidth 是 zoom 之后的值，判断列宽要用还原后的真实宽度
+  const real = w / (zoom.value || 1);
   const n = Math.max(1, store.columns.length);
-  const per = (w - 32 - 12 * (n - 1) - 12) / n;
+  const per = (real - 32 - 12 * (n - 1) - 12) / n;
   // 滞回：进紧凑用 <175、退紧凑要 >200；并且只在真的变化时赋值。
   // 否则「改 compact → 布局变 → ResizeObserver 又触发」会形成循环通知，
   // 浏览器会抛 "ResizeObserver loop completed with undelivered notifications"。
@@ -95,7 +119,13 @@ async function addColumn() {
       <button class="hint-close" @click="hintDismissed = true">✕</button>
     </div>
 
-    <div ref="boardRef" class="board" :class="{ compact, ultra }">
+    <div
+      ref="viewportRef"
+      class="board-viewport"
+      title="Ctrl + 滚轮缩放，普通滚轮横向滚动"
+      @wheel="onWheel"
+    >
+    <div ref="boardRef" class="board" :class="{ compact, ultra }" :style="{ zoom: String(zoom) }">
       <VueDraggable
         v-model="store.columns"
         :animation="200"
@@ -115,6 +145,16 @@ async function addColumn() {
         <span style="color: var(--text-subtle)">+ 添加列</span>
       </div>
     </div>
+
+      <!-- 缩放控件：贴在右下角，不挡看板内容 -->
+      <div class="board-zoom" @pointerdown.stop @mousedown.stop>
+        <button title="缩小" @click="setZoom(zoom - 0.1)">−</button>
+        <button class="bz-pct" title="恢复 100%" @click="setZoom(1)">
+          {{ Math.round(zoom * 100) }}%
+        </button>
+        <button title="放大" @click="setZoom(zoom + 0.1)">＋</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -125,6 +165,55 @@ async function addColumn() {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+.board-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+.board-zoom {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
+  opacity: 0.62;
+  transition: opacity 0.15s var(--ease-out);
+}
+.board-viewport:hover .board-zoom {
+  opacity: 1;
+}
+.board-zoom button {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 13px;
+  line-height: 22px;
+  cursor: pointer;
+}
+.board-zoom button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.board-zoom .bz-pct {
+  width: auto;
+  min-width: 42px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .board-hint {
   display: flex;

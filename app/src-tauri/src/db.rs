@@ -168,6 +168,14 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
     }
+    // Migration: 交付格式（word/pdf/ppt/md/html），空 = 未指定。
+    // 只影响「给 AI 的指令」里的输出要求，不影响任务本身。
+    if !task_cols.iter().any(|c| c == "deliver_fmt") {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN deliver_fmt TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
 
     // Migration: whiteboard notes grow from "just a sticky note" into a generic
     // node (sticky / text / mind-map / uploaded file / group box).

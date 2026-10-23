@@ -102,6 +102,7 @@ const real = {
       start_date?: string | null;
       progress?: number | null;
       bar_color?: string | null;
+      deliver_fmt?: string;
       completed?: boolean;
       tags?: number[];
     }

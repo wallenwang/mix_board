@@ -175,6 +175,7 @@ const apiImpl = {
       tags: t.tags ?? [],
       wx: t.wx ?? null,
       wy: t.wy ?? null,
+      deliver_fmt: t.deliver_fmt ?? "",
       // 项目内编号，删掉的号不回收 —— 与桌面版一致
       seq:
         tasks
@@ -195,6 +196,7 @@ const apiImpl = {
       if ("start_date" in patch) t.start_date = patch.start_date;
       if ("progress" in patch) t.progress = patch.progress;
       if ("bar_color" in patch) t.bar_color = patch.bar_color;
+      if ("deliver_fmt" in patch) t.deliver_fmt = patch.deliver_fmt;
       // 勾「完成」= 盖一个完成时间戳（跟桌面版 Rust 侧语义一致）
       if ("completed" in patch) {
         t.completed_at = patch.completed ? new Date().toLocaleString("sv-SE") : null;

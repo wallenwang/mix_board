@@ -481,6 +481,8 @@ pub struct TaskOut {
     pub bar_color: Option<String>,
     /// 项目内编号（T1、T2…）。删除后不回收，0 表示尚未编号
     pub seq: i64,
+    /// 交付格式（word/pdf/ppt/md/html），空 = 未指定
+    pub deliver_fmt: String,
 }
 
 #[tauri::command]
@@ -489,7 +491,7 @@ pub fn list_tasks(db: State<Db>, project_id: i64) -> Result<Vec<TaskOut>, String
     let mut stmt = conn
         .prepare(
             "SELECT id,project_id,column_id,title,description,priority,due_date,
-                    sort_order,created_at,updated_at,completed_at,wx,wy,start_date,progress,bar_color,seq
+                    sort_order,created_at,updated_at,completed_at,wx,wy,start_date,progress,bar_color,seq,deliver_fmt
              FROM tasks WHERE project_id=?1 AND deleted_at IS NULL
              ORDER BY sort_order, id",
         )
@@ -515,6 +517,7 @@ pub fn list_tasks(db: State<Db>, project_id: i64) -> Result<Vec<TaskOut>, String
                 progress: r.get(14)?,
                 bar_color: r.get(15)?,
                 seq: r.get(16)?,
+                deliver_fmt: r.get(17)?,
             })
         })
         .map_err(map_err)?
@@ -594,6 +597,8 @@ pub struct TaskPatch {
     pub tags: Option<Vec<i64>>,
     /// 甘特条手动配色：Some(None) = 恢复自动配色，Some(Some(hex)) = 指定颜色
     pub bar_color: Option<Option<String>>,
+    /// 交付格式，Some("") = 清空为未指定
+    pub deliver_fmt: Option<String>,
 }
 
 #[tauri::command]
@@ -647,6 +652,13 @@ pub fn update_task(db: State<Db>, id: i64, patch: TaskPatch) -> Result<(), Strin
         conn.execute(
             "UPDATE tasks SET bar_color=?1,updated_at=datetime('now','localtime') WHERE id=?2",
             params![v, id],
+        )
+        .map_err(map_err)?;
+    }
+    if let Some(f) = patch.deliver_fmt {
+        conn.execute(
+            "UPDATE tasks SET deliver_fmt=?1,updated_at=datetime('now','localtime') WHERE id=?2",
+            params![f, id],
         )
         .map_err(map_err)?;
     }
