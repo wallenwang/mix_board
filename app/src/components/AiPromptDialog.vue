@@ -58,10 +58,15 @@ async function doCopy() {
   <el-dialog
     v-model="aiPromptOpen"
     :title="aiPromptTitle"
-    width="760px"
+    width="680px"
     append-to-body
     draggable
     overflow
+    :modal="false"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :lock-scroll="false"
+    class="ai-dialog"
   >
     <div class="ai-tip">
       将下列指令粘贴给 AI，同时把「参考材料」中列出的文件一并提交。

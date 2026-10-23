@@ -1303,3 +1303,22 @@ html.dark .view-switch .pane-toggle.on {
 .ai-text:focus {
   border-color: var(--accent);
 }
+
+/* ---------- 给 AI 的指令：浮动面板（非模态） ----------
+   modal=false 时 Element Plus 仍会渲染 .el-overlay，但让它不拦截鼠标，
+   这样面板旁边能照常操作白板、缩放、拖卡片。 */
+.ai-dialog {
+  /* 非模态：不加遮罩层，面板旁边能照常操作白板 */
+}
+/* Element Plus 2.9 在 modal=false 时用 .el-modal-dialog 而不是 .el-overlay，
+   它是 fixed 全屏且 pointer-events:auto，会把下面的白板整个挡住。
+   让它不接鼠标，只有对话框本身接。 */
+.el-modal-dialog:has(.ai-dialog),
+.el-overlay-dialog:has(.ai-dialog) {
+  pointer-events: none;
+  background: transparent;
+}
+.el-modal-dialog:has(.ai-dialog) .el-dialog,
+.el-overlay-dialog:has(.ai-dialog) .el-dialog {
+  pointer-events: auto;
+}

@@ -196,7 +196,26 @@ interface Neighbor {
   seq: string;
   title: string;
   done: boolean;
+  /** 子任务的说明，让它在指令里不只是一个名字 */
+  desc: string;
+  /** 子任务已标注的关注重点数量 */
+  points: number;
 }
+
+/** 连到本任务的白板节点（思维导图、便签、文字），它们也是参数 */
+interface BoardLink {
+  kind: string;
+  label: string;
+  text: string;
+}
+
+const BOARD_KIND_NAME: Record<string, string> = {
+  mind: "思维导图",
+  note: "便签",
+  text: "文字",
+  doc: "文档",
+  file: "资料",
+};
 
 function collectLinks(store: PromptStore, taskId: number) {
   /** 连线两端各自指向哪个任务：from 是上级/前置/产出方，to 是下级/后续 */
@@ -207,36 +226,42 @@ function collectLinks(store: PromptStore, taskId: number) {
   const prev: Neighbor[] = [];
   const next: Neighbor[] = [];
   const outputs: string[] = [];
+  const boardLinks: BoardLink[] = [];
 
-  const asNeighbor = (t: Task): Neighbor => ({
-    seq: store.numberOf(t.id),
-    title: t.title,
-    done: !!t.completed_at,
-  });
+  const asNeighbor = (t: Task): Neighbor => {
+    const refs = store.refsOfTask(t.id);
+    return {
+      seq: store.numberOf(t.id),
+      title: t.title,
+      done: !!t.completed_at,
+      desc: (t.description || "").trim(),
+      points: refs.filter((r) => (r.point || "").trim()).length,
+    };
+  };
 
   for (const e of store.edges) {
     const kind = e.kind || "decompose";
-    // 上级：别人 → 我（父子）
+    // 所属任务：别人 → 我（父子，本任务是它的一部分）
     if (kind === "decompose" && e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
       const t = atFrom(e);
       if (t) parentRow = asNeighbor(t);
     }
-    // 下级：我 → 别人（父子）
+    // 下级任务：我 → 别人（父子，本任务拆出的子项）
     if (kind === "decompose" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
       const t = atTo(e);
       if (t) children.push(asNeighbor(t));
     }
-    // 上一个环节：前置 → 我
+    // 前置任务：前置 → 我（必须等它完成）
     if (kind === "precede" && e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
       const t = atFrom(e);
       if (t) prev.push(asNeighbor(t));
     }
-    // 下一个环节：我 → 后续
+    // 后续任务：我 → 后续（它在等本任务）
     if (kind === "precede" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
       const t = atTo(e);
       if (t) next.push(asNeighbor(t));
     }
-    // 产出：我 → 文档 / 资料
+    // 产出：我 → 文档 / 资料节点
     if (kind === "produce" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "note") {
       const n = store.notes.find((x) => x.id === e.to_id);
       if (n) {
@@ -244,8 +269,37 @@ function collectLinks(store: PromptStore, taskId: number) {
         outputs.push((n.text || f?.name || "产出").trim());
       }
     }
+    // 白板节点 → 我：思维导图、便签、文字等，都是本任务要用到的参数。
+    // file 节点跳过 —— 那些是资料，已经在「参考材料」里，不重复列。
+    if (e.to_kind === "task" && e.to_id === taskId && e.from_kind === "note") {
+      const n = store.notes.find((x) => x.id === e.from_id);
+      if (n && n.kind !== "box" && n.kind !== "gantt" && n.kind !== "file") {
+        const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+        boardLinks.push({
+          kind: n.kind,
+          label: (n.text || f?.name || "").trim().slice(0, 40),
+          text: (n.text || "").trim(),
+        });
+      }
+    }
+    // 我 → 白板节点（除产出外的连线，例如连到一张便签上补充说明）
+    if (
+      e.from_kind === "task" &&
+      e.from_id === taskId &&
+      e.to_kind === "note" &&
+      kind !== "produce"
+    ) {
+      const n = store.notes.find((x) => x.id === e.to_id);
+      if (n && n.kind !== "box" && n.kind !== "gantt" && n.kind !== "file") {
+        boardLinks.push({
+          kind: n.kind,
+          label: (n.text || "").trim().slice(0, 40),
+          text: (n.text || "").trim(),
+        });
+      }
+    }
   }
-  return { parent: parentRow as Neighbor | null, children, prev, next, outputs };
+  return { parent: parentRow, children, prev, next, outputs, boardLinks };
 }
 
 /* ---------------- 组装 ---------------- */
@@ -379,18 +433,23 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 三、任务关系 */
   const links = collectLinks(store, taskId);
   const posLines: string[] = [];
-  if (links.parent) posLines.push(`- 所属上级：T${links.parent.seq} ${links.parent.title}`);
+  if (links.parent) {
+    posLines.push(`- 所属任务：T${links.parent.seq} ${links.parent.title}`);
+    posLines.push("  （本任务是它的一部分，完成后作为它的组成部分交付）");
+  }
   for (const p of links.prev) {
     posLines.push(
-      `- 上游任务：T${p.seq} ${p.title}${p.done ? "（已完成）" : "（进行中，其结论可能变动）"}`
+      `- 前置任务：T${p.seq} ${p.title}` +
+        (p.done ? "（已完成，其结论可直接采用）" : "（进行中，其结论可能变动）")
     );
   }
   for (const p of links.next) {
-    posLines.push(`- 下游任务：T${p.seq} ${p.title}（待本任务完成后启动）`);
+    posLines.push(`- 后续任务：T${p.seq} ${p.title}（待本任务完成后启动）`);
   }
-  if (links.children.length) {
-    const names = links.children.map((c) => `T${c.seq} ${c.title}`).join("、");
-    posLines.push(`- 下级任务：${names}`);
+  for (const c of links.children) {
+    const extra = c.desc ? `：${c.desc.split("\n")[0].slice(0, 60)}` : "";
+    const pts = c.points ? `（已标注 ${c.points} 项关注重点）` : "";
+    posLines.push(`- 下级任务：T${c.seq} ${c.title}${extra}${pts}`);
   }
   if (posLines.length) {
     out.push("三、任务关系");
@@ -398,10 +457,24 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     out.push("");
   }
 
-  /* 四、交付物 */
+  /* 四、白板关联内容：思维导图、便签、文字节点，都是本任务要用到的参数 */
+  const boards = links.boardLinks.filter((b) => b.text);
+  if (boards.length) {
+    out.push("四、白板关联内容");
+    out.push("本任务在白板上关联的节点如下，均为工作输入的一部分：");
+    for (const b of boards) {
+      const name = BOARD_KIND_NAME[b.kind] || "节点";
+      const title = b.label && b.label !== b.text ? `${name}「${b.label}」` : name;
+      const oneLine = b.text.replace(/\s*\n\s*/g, " / ").slice(0, 400);
+      out.push(`- ${title}：${oneLine}`);
+    }
+    out.push("");
+  }
+
+  /* 五、交付物 */
   const fmt = (t.deliver_fmt || "").trim().toLowerCase();
   const fmtName = DELIVER_NAME[fmt] || "";
-  out.push("四、交付物");
+  out.push("五、交付物");
   if (links.outputs.length) {
     for (const o of links.outputs) out.push(`- ${o}`);
   } else {
@@ -410,8 +483,8 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   if (fmtName) out.push(`- 交付格式：${fmtName}`);
   out.push("");
 
-  /* 五、输出要求 */
-  out.push("五、输出要求");
+  /* 六、输出要求 */
+  out.push("六、输出要求");
   let n = 1;
   out.push(`${n++}. 结论先行：直接给出交付内容，不复述任务背景，结尾不询问是否继续`);
   if (refs.some((r) => r.level === 0)) {
@@ -433,7 +506,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 六、信息缺口 */
   if (!fmtName) gaps.push("未指定交付格式");
   if (gaps.length) {
-    out.push("六、信息缺口");
+    out.push("七、信息缺口");
     out.push("以下内容尚未确定，可能影响交付质量：");
     for (const g of gaps) out.push(`- ${g}`);
     out.push("");
