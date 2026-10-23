@@ -213,10 +213,14 @@ export const seedNotes: BoardNote[] = [
   fileNode(4, "日式杂志版式", F(5), 90, 530),
   fileNode(5, "茶室摄影集", F(4), 90, 725),
 
-  // 思维导图 / 便签 / 文字：白板上的思路，也是给 AI 的参数
+  // 白板上的思路节点。⚠️ 分清「谁的产出」和「谁的依据」——
+  // 同一个便签可以既是谁的产出、又是谁的依据，方向不能连反。
+  // 品牌关键词 = 调性提炼的产出，不是它的输入
   noteNode(21, "东方克制 / 留白 / 釉色 / 低饱和 / 人文", "#E7E2F3", "mind", 60, 900, 300, 96),
+  // 两张便签是用户访谈的结论（产出），同时约束后面的设计（依据）
   noteNode(22, "不要用金色，太俗", "#F4E3C3", "note", 60, 1030, 240, 80),
   noteNode(23, "包装要能单手开合", "#F4E3C3", "note", 60, 1145, 240, 80),
+  // 这条是外部约束（客户要求），不是谁的产出
   noteNode(24, "版式参考日式杂志，12 栏网格", "#E7E2F3", "text", 60, 1260, 300, 72),
 
   // 产出节点
@@ -272,8 +276,11 @@ export const seedEdges: BoardEdge[] = [
   edge(20, ["task", T(21)], ["task", T(22)], "precede"),
   edge(21, ["task", T(22)], ["task", T(24)], "precede"),
   edge(22, ["task", T(23)], ["task", T(24)], "precede"),
+  // 调性提炼要等竞品分析与用户访谈出结论
+  edge(39, ["task", T(11)], ["task", T(13)], "precede"),
+  edge(40, ["task", T(12)], ["task", T(13)], "precede"),
 
-  // 依据：资料 → 任务
+  // 依据：资料 / 结论 → 任务（谁用它）
   edge(23, ["note", N(1)], ["task", T(22)], "evidence"),   // 品牌手册 → 色彩
   edge(24, ["note", N(1)], ["task", T(23)], "evidence"),   // 品牌手册 → 字体
   edge(25, ["note", N(1)], ["task", T(212)], "evidence"),  // 品牌手册 → 标志细化
@@ -281,15 +288,19 @@ export const seedEdges: BoardEdge[] = [
   edge(27, ["note", N(3)], ["task", T(221)], "evidence"),  // 釉色参考 → 主色
   edge(28, ["note", N(4)], ["task", T(24)], "evidence"),   // 日式版式 → 版式网格
   edge(29, ["note", N(5)], ["task", T(12)], "evidence"),   // 茶室摄影 → 用户访谈
-  edge(30, ["note", N(21)], ["task", T(13)], "evidence"),  // 思维导图 → 调性提炼
-  edge(31, ["note", N(22)], ["task", T(22)], "evidence"),  // 便签「不用金色」→ 色彩
-  edge(32, ["note", N(23)], ["task", T(32)], "evidence"),  // 便签「单手开合」→ 包装
-  edge(33, ["note", N(24)], ["task", T(24)], "evidence"),  // 文字「日式版式」→ 版式网格
+  edge(31, ["note", N(22)], ["task", T(22)], "evidence"),  // 访谈结论 → 色彩
+  edge(32, ["note", N(23)], ["task", T(32)], "evidence"),  // 访谈结论 → 包装
+  edge(33, ["note", N(24)], ["task", T(24)], "evidence"),  // 客户要求 → 版式网格
 
-  // 产出
+  // 产出：任务 → 它交出来的东西。
+  // ⚠️ 思维导图「品牌关键词」是调性提炼的产出，不是它的输入；
+  // 两张便签是用户访谈的结论 —— 产出一次、被后面的任务引用多次。
+  edge(30, ["task", T(13)], ["note", N(21)], "produce"),   // 调性提炼 → 品牌关键词
   edge(34, ["task", T(13)], ["note", N(31)], "produce"),   // 调性提炼 → 调性说明
-  edge(35, ["task", T(24)], ["note", N(32)], "produce"),   // 版式网格 → 版式规范
-  edge(36, ["task", T(41)], ["note", N(33)], "produce"),   // 品牌手册 → 手册成稿
+  edge(35, ["task", T(12)], ["note", N(22)], "produce"),   // 用户访谈 → 不要金色
+  edge(36, ["task", T(12)], ["note", N(23)], "produce"),   // 用户访谈 → 单手开合
+  edge(37, ["task", T(24)], ["note", N(32)], "produce"),   // 版式网格 → 版式规范
+  edge(38, ["task", T(41)], ["note", N(33)], "produce"),   // 品牌手册 → 手册成稿
 ];
 
 /* ------------------------------------------------------------------

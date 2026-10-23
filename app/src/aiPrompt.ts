@@ -200,6 +200,10 @@ interface Neighbor {
   desc: string;
   /** 子任务已标注的关注重点数量 */
   points: number;
+  /** 下级任务挂的资料（父任务要能俯瞰，否则它一份材料都看不到） */
+  refs: { label: string; level: number; point: string }[];
+  /** 上游任务交出来的东西（下游的输入往往是上一环的结论） */
+  outputs: string[];
 }
 
 /** 连到本任务的白板节点（思维导图、便签、文字），它们也是参数 */
@@ -229,13 +233,37 @@ function collectLinks(store: PromptStore, taskId: number) {
   const boardLinks: BoardLink[] = [];
 
   const asNeighbor = (t: Task): Neighbor => {
-    const refs = store.refsOfTask(t.id);
+    const rs = store.refsOfTask(t.id);
+    // 这个任务交出来的东西：produce 边指向的节点
+    const outs: string[] = [];
+    for (const e of store.edges) {
+      if (
+        e.kind === "produce" &&
+        e.from_kind === "task" &&
+        e.from_id === t.id &&
+        e.to_kind === "note"
+      ) {
+        const n = store.notes.find((x) => x.id === e.to_id);
+        const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+        if (n) outs.push((n.text || f?.name || "产出").trim());
+      }
+    }
     return {
       seq: store.numberOf(t.id),
       title: t.title,
       done: !!t.completed_at,
       desc: (t.description || "").trim(),
-      points: refs.filter((r) => (r.point || "").trim()).length,
+      points: rs.filter((r) => (r.point || "").trim()).length,
+      refs: rs.map((r) => {
+        const n = store.notes.find((x) => x.id === r.note_id);
+        const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+        return {
+          label: (n?.text || f?.name || "资料").trim(),
+          level: r.level,
+          point: (r.point || "").trim(),
+        };
+      }),
+      outputs: outs,
     };
   };
 
@@ -390,8 +418,7 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   const refs = collectRefs(store, taskId);
   head("参考材料");
   if (!refs.length) {
-    out.push("（本任务尚未关联任何资料。）");
-    gaps.push("未关联任何资料，缺少工作依据");
+    out.push("（本任务尚未直接关联外部资料。）");
   } else {
     out.push(
       `下列 ${refs.length} 份资料随本指令一并提供，请直接查阅原文件。` +
@@ -462,6 +489,38 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     out.push("");
   }
 
+  // 下级任务挂的资料：父任务本身往往不直接挂材料，但它要俯瞰全局。
+  // 分开放而不是并进上面的三档，是为了分清「本任务直接用的」和「下级在用的」。
+  const childRefRows: string[] = [];
+  for (const c of links.children) {
+    for (const r of c.refs) {
+      const lv = r.level === 0 ? "强制约束" : r.level === 1 ? "参考依据" : "背景资料";
+      const pt = r.point ? `\n     关注重点：${r.point}` : "";
+      childRefRows.push(`- T${c.seq} ${c.title} ← ${r.label}（${lv}）${pt}`);
+    }
+  }
+  if (childRefRows.length) {
+    head("下级任务的参考材料");
+    out.push("以下资料由下级任务直接使用，供整体把握时参考：");
+    out.push(...childRefRows);
+    out.push("");
+  }
+
+  // 上游任务的产出：下游任务的工作输入往往就是上游的结论，不是外部文件。
+  // 不带这一段，下游任务会显示「未关联任何资料」，但其实它的依据在上一环里。
+  const upstreamRows: string[] = [];
+  for (const p of links.prev) {
+    for (const o of p.outputs) {
+      upstreamRows.push(`- T${p.seq} ${p.title} → ${o}`);
+    }
+  }
+  if (upstreamRows.length) {
+    head("上游任务的产出");
+    out.push("以下成果由上游任务交付，可作为本任务的工作输入：");
+    out.push(...upstreamRows);
+    out.push("");
+  }
+
   /* 四、白板关联内容：思维导图、便签、文字节点，都是本任务要用到的参数 */
   const boards = links.boardLinks.filter((b) => b.text);
   if (boards.length) {
@@ -510,6 +569,14 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
 
   /* 六、信息缺口 */
   if (!fmtName) gaps.push("未指定交付格式");
+  // 没挂外部资料不一定就是缺口：如果上游有产出，工作依据在上一环里
+  if (!refs.length) {
+    if (links.prev.some((p) => p.outputs.length)) {
+      /* 有上游产出，不算缺口 */
+    } else {
+      gaps.push("未关联任何资料，且上游任务也没有产出，缺少工作依据");
+    }
+  }
   if (gaps.length) {
     head("信息缺口");
     out.push("以下内容尚未确定，可能影响交付质量：");
