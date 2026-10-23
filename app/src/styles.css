@@ -1324,12 +1324,11 @@ html.dark .view-switch .pane-toggle.on {
 }
 
 /* ---------- 连线菜单的等级行：支撑类关系（父子/依据）才显示 ---------- */
+/* 等级行跟「删除」同一行：删除 | 强依据 参考 弱参考 */
 .em-levels {
   display: flex;
   gap: 4px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--hairline-strong);
+  flex: 1;
 }
 .em-lv {
   flex: 1;

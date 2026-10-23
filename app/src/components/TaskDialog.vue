@@ -10,6 +10,14 @@ import { reportError } from "../diag";
 
 const props = defineProps<{ modelValue: boolean; task: Task }>();
 const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
+
+/** el-dialog 的 v-model 桥接到 props：模板里写 @update-model-value 接不到
+ *  emit('update:modelValue')（Vue 事件名转换对不上），关闭时父组件状态卡在 true，
+ *  第二次点「编辑」就没反应了。 */
+const visible = computed({
+  get: () => props.modelValue,
+  set: (v: boolean) => emit("update:modelValue", v),
+});
 const store = useBoardStore();
 
 import { DELIVER_OPTIONS } from "../aiPrompt";
@@ -152,8 +160,7 @@ async function createTag() {
 
 <template>
   <el-dialog
-    :model-value="modelValue"
-    @update-model-value="emit('update:modelValue', $event)"
+    v-model="visible"
     title="任务详情"
     width="560px"
     append-to-body

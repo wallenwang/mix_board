@@ -741,6 +741,17 @@ function cancelEditTaskFull() {
   editingTaskFull.value = null;
 }
 
+/** 焦点离开编辑区（点到卡片外面）= 保存退出。
+ *  没有这一步的话：新建任务自动进编辑态，标题整行是输入框，
+ *  用户直接拖会被 input 拦住拖不动（看着就像"粘住"）。 */
+function onEditFocusOut(e: FocusEvent, t: Task) {
+  const next = e.relatedTarget as HTMLElement | null;
+  const box = e.currentTarget as HTMLElement;
+  // 焦点还在编辑区里（比如点「保存 / 取消」）不算离开
+  if (next && box.contains(next)) return;
+  void commitTaskFull(t);
+}
+
 async function commitTaskFull(t: Task) {
   if (editingTaskFull.value !== t.id) return;
   editingTaskFull.value = null;
@@ -841,6 +852,9 @@ async function createNode(kind: NodeKind, x: number, y: number, opts: { edit?: b
   if (store.currentProjectId == null) return null;
   const d = KIND_DEFAULT[kind];
   const s = sizeOfNode(kind, null, null);
+  const spot = findFreeSpot(x, y, s.w, s.h);
+  x = spot.x;
+  y = spot.y;
   const fields = {
     project_id: store.currentProjectId,
     x,
@@ -889,8 +903,35 @@ async function createAtPointer(e: MouseEvent) {
  * 建的是**真任务**，跟看板里新建的完全一样：会落到看板第一列，
  * 所以看板那边刷新就能看到，不用同步两份数据。
  */
+/** 落点被别的卡片占了就错开一点：叠在一点上的两个节点，点谁、拖谁全靠运气 */
+function findFreeSpot(x: number, y: number, w: number, h: number): { x: number; y: number } {
+  const hits = (px: number, py: number) => {
+    for (const t of store.allTasks) {
+      const p = posOf("task", t.id);
+      if (px < p.x + TASK_W && px + w > p.x && py < p.y + 150 && py + h > p.y) return true;
+    }
+    for (const n of store.notes) {
+      const p = posOf("note", n.id);
+      const sz = noteSize(n);
+      if (px < p.x + sz.w && px + w > p.x && py < p.y + sz.h && py + h > p.y) return true;
+    }
+    return false;
+  };
+  let nx = x;
+  let ny = y;
+  for (let i = 0; i < 14; i++) {
+    if (!hits(nx, ny)) return { x: nx, y: ny };
+    nx += 26;
+    ny += 30;
+  }
+  return { x: nx, y: ny };
+}
+
 async function addTaskAt(wx: number, wy: number): Promise<number | null> {
   if (store.currentProjectId == null) return null;
+  const spot = findFreeSpot(wx, wy, TASK_W, 120);
+  wx = spot.x;
+  wy = spot.y;
   const col = store.columns[0];
   if (!col) {
     ElMessage.warning("这个项目还没有看板列，请先在看板里建一列");
@@ -1877,38 +1918,6 @@ const visibleEdges = computed(() =>
 const edgePick = ref<{ id: number; x: number; y: number } | null>(null);
 
 /** 四种关系。默认分解，其余三种只在真要表达时才动，平时界面是干净的 */
-// 「支撑」把父子与依据合成一组：子集就是父集的依据，强弱在下面的等级行调，
-// 不再让用户在「父子 / 依据」之间做区分（那是存储层的事，不是心智模型里的事）。
-const EDGE_KIND_META: {
-  key: string;
-  kinds: EdgeKind[];
-  label: string;
-  short: string;
-  hint: string;
-}[] = [
-  {
-    key: "support",
-    kinds: ["decompose", "evidence"],
-    label: "支撑",
-    short: "下级或材料支撑",
-    hint: "下级支撑上级、材料支撑任务；强弱用下面三档调",
-  },
-  {
-    key: "precede",
-    kinds: ["precede"],
-    label: "先后",
-    short: "前置完成才轮到",
-    hint: "前置 → 后续：前一项完成，后一项才能开始（时间顺序）",
-  },
-  {
-    key: "produce",
-    kinds: ["produce"],
-    label: "产出",
-    short: "任务交出结果",
-    hint: "任务 → 成果：这一步交出来的文档或成果",
-  },
-];
-
 /** 世界坐标 → 画布内像素（工具条不跟着缩放，所以不能用世界坐标） */
 function worldToScreen(x: number, y: number) {
   return { x: x * zoom.value + panX.value, y: y * zoom.value + panY.value };
@@ -1943,32 +1952,6 @@ function openEdgeMenu(e: BoardEdge, ev: MouseEvent) {
   };
   void placeEdgeMenu();
 }
-
-const edgeMenuKind = computed<EdgeKind | "">(
-  () => store.edges.find((e) => e.id === edgePick.value?.id)?.kind ?? ""
-);
-
-/**
- * 菜单里点「支撑 / 先后 / 产出」。
- * 「支撑」在存储层有两种：材料→任务记为依据（含关注重点），下级→上级记为分解（撑结构）。
- * 选哪一种由端点决定，用户不需要关心。
- */
-async function pickEdgeKind(m: { key: string; kinds: EdgeKind[] }) {
-  const cur = edgePick.value;
-  if (!cur) return;
-  const e = store.edges.find((x) => x.id === cur.id);
-  let kind: EdgeKind = m.kinds[0];
-  if (m.key === "support") {
-    kind = e && e.from_kind === "note" && e.to_kind === "task" ? "evidence" : "decompose";
-  }
-  try {
-    await api.updateEdge(cur.id, { kind });
-    await store.refreshBoard();
-  } catch (e2) {
-    reportError("改连线类型", e2);
-  }
-}
-
 /**
  * 支撑类关系的等级（强依据 / 参考 / 弱参考）。
  *
@@ -1984,12 +1967,6 @@ const LEVEL_META = [
   { v: 1, label: "参考", hint: "可用于补充，不构成强制要求" },
   { v: 2, label: "弱参考", hint: "仅供理解语境，不作论据" },
 ];
-
-/** 这条边算不算「支撑」（有等级可调） */
-function isSupportEdge(): boolean {
-  const k = edgeMenuKind.value;
-  return k === "decompose" || k === "evidence";
-}
 
 /** 读当前等级：依据查 task_refs，分解查 strength */
 function edgeLevel(): number {
@@ -4208,38 +4185,24 @@ const numOf = (t: Task) => store.numberOf(t.id);
       @click.stop
       @contextmenu.prevent.stop
     >
+      <!-- 连线就是「支撑」，唯一要标的是它有多硬：强依据 / 参考 / 弱参考 -->
       <div class="em-row">
         <button class="em-del" title="删除这条连线" @click="removeEdgeById">
           <AppIcon name="trash" :size="14" />
           <span>删除</span>
         </button>
-        <div class="em-grid">
+        <div class="em-levels">
           <button
-            v-for="m in EDGE_KIND_META"
-            :key="m.key"
-            class="em-kind"
-            :class="{ on: m.kinds.includes(edgeMenuKind) }"
-            :title="m.hint"
-            @click="pickEdgeKind(m)"
+            v-for="l in LEVEL_META"
+            :key="l.v"
+            class="em-lv"
+            :class="{ on: edgeLevel() === l.v }"
+            :title="l.hint"
+            @click="setEdgeLevel(l.v)"
           >
-            <i class="em-dot" :class="'k-' + (m.kinds.includes(edgeMenuKind) ? edgeMenuKind : m.kinds[0])"></i>
-            <b>{{ m.label }}</b>
-            <small>{{ m.short }}</small>
+            {{ l.label }}
           </button>
         </div>
-      </div>
-      <!-- 支撑类关系可以调等级：同一个资料连两个任务，两条线各是各的档 -->
-      <div v-if="isSupportEdge()" class="em-levels">
-        <button
-          v-for="l in LEVEL_META"
-          :key="l.v"
-          class="em-lv"
-          :class="{ on: edgeLevel() === l.v }"
-          :title="l.hint"
-          @click="setEdgeLevel(l.v)"
-        >
-          {{ l.label }}
-        </button>
       </div>
     </div>
 
@@ -4390,9 +4353,9 @@ const numOf = (t: Task) => store.numberOf(t.id);
         <defs>
           <!-- 箭头颜色必须跟着线走：marker 不继承 stroke，只能一种关系一个 -->
           <marker
-            v-for="m in EDGE_KIND_META"
-            :id="'wb-arrow-' + m.kind"
-            :key="m.kind"
+            v-for="mk in ['decompose', 'precede', 'evidence', 'produce']"
+            :id="'wb-arrow-' + mk"
+            :key="mk"
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -4400,7 +4363,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
             markerHeight="5.5"
             orient="auto-start-reverse"
           >
-            <path :class="'mk-' + m.kind" d="M0 0 L10 5 L0 10 z" />
+            <path :class="'mk-' + mk" d="M0 0 L10 5 L0 10 z" />
           </marker>
           <marker
             id="wb-arrow-live"
@@ -4447,9 +4410,15 @@ const numOf = (t: Task) => store.numberOf(t.id);
           borderLeftColor: prio(t).color,
         }"
         @pointerdown="startDrag($event, 'task', t.id)"
-        @dblclick="startEditTask(t)"
+        @dblclick="openTask(t.id)"
       >
-        <div v-if="editingTaskFull === t.id" class="tn-edit" @pointerdown.stop @dblclick.stop>
+        <div
+          v-if="editingTaskFull === t.id"
+          class="tn-edit"
+          @pointerdown.stop
+          @dblclick.stop
+          @focusout="onEditFocusOut($event, t)"
+        >
           <input
             ref="taskFullTitleInput"
             v-model="taskDraftTitle"
@@ -4496,7 +4465,12 @@ const numOf = (t: Task) => store.numberOf(t.id);
               >▸ {{ store.taskChildCount(t.id) }}</span
             >
           </div>
-          <div v-if="t.description" class="tn-desc" :title="t.description">{{ t.description }}</div>
+          <div
+            v-if="t.description"
+            class="tn-desc"
+            :title="t.description + '\n双击就地快速编辑'"
+            @dblclick.stop="startEditTaskFull(t)"
+          >{{ t.description }}</div>
           <div v-if="store.refsOfTask(t.id).length" class="tn-refs" @pointerdown.stop>
             <span
               v-for="r in store.refsOfTask(t.id)"
@@ -4541,11 +4515,12 @@ const numOf = (t: Task) => store.numberOf(t.id);
               📝
             </button>
           <button
-            title="就地编辑标题和任务说明（不弹窗）"
+            class="tb-edit"
+            title="编辑任务（跟看板同一张编辑卡）"
             @pointerdown.stop
-            @click.stop="startEditTaskFull(t)"
+            @click.stop="openTask(t.id)"
           >
-            ✎ 编辑
+            <AppIcon name="edit" :size="12" :stroke="1.9" />
           </button>
           <button
             class="tb-ai"
@@ -4554,9 +4529,6 @@ const numOf = (t: Task) => store.numberOf(t.id);
             @click.stop="openAiPrompt(t)"
           >
             AI
-          </button>
-          <button title="打开完整任务详情" @pointerdown.stop @click.stop="openTask(t.id)">
-            详情
           </button>
         </div>
         <span
