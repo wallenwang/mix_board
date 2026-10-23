@@ -134,7 +134,7 @@ function openEdit(e?: Event) {
         >
           AI
         </button>
-        <button class="task-act" title="编辑任务（标题 / 备注 / 日期 / 优先级 / 标签）" @click.stop="openEdit($event)">
+        <button class="task-act" title="编辑任务（标题 / 任务说明 / 日期 / 优先级 / 标签）" @click.stop="openEdit($event)">
           <AppIcon name="edit" :size="12" :stroke="1.9" />
         </button>
         <button class="task-act del" title="删除任务" @click.stop="quickDelete($event)">

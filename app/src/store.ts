@@ -297,13 +297,14 @@ export const useBoardStore = defineStore("board", () => {
     if (persist) api.setSetting("split_ratio", String(clamped)).catch(() => {});
   }
 
-  /** task → task 的父子关系（来自白板连线：from = 父，to = 子） */
+  /** task → task 的父子关系（来自白板连线：from = 子，to = 父） */
   const taskParentOf = computed(() => {
     const m = new Map<number, number>();
     for (const e of edges.value) {
+      if (e.kind !== "decompose") continue; // 只有分解边才是层级；先后边也是 task→task，混进来会把先后当父子
       if (e.from_kind !== "task" || e.to_kind !== "task") continue;
       if (e.from_id === e.to_id) continue;
-      m.set(e.to_id, e.from_id);
+      m.set(e.from_id, e.to_id); // from 的上级是 to
     }
     return m;
   });
@@ -328,10 +329,12 @@ export const useBoardStore = defineStore("board", () => {
   function taskDescendants(id: number): number[] {
     const kidsOf = new Map<number, number[]>();
     for (const e of edges.value) {
+      if (e.kind !== "decompose") continue;
       if (e.from_kind !== "task" || e.to_kind !== "task") continue;
-      const arr = kidsOf.get(e.from_id);
-      if (arr) arr.push(e.to_id);
-      else kidsOf.set(e.from_id, [e.to_id]);
+      // from 是子、to 是父：父的下级列表里放 from
+      const arr = kidsOf.get(e.to_id);
+      if (arr) arr.push(e.from_id);
+      else kidsOf.set(e.to_id, [e.from_id]);
     }
     const out: number[] = [];
     const seen = new Set<number>([id]);
@@ -348,10 +351,10 @@ export const useBoardStore = defineStore("board", () => {
     return out;
   }
 
-  /** 直接子任务数量（看板卡片上做标记用） */
+  /** 直接子任务数量（看板卡片上做标记用）：数指向我的分解边 = 我的下级 */
   function taskChildCount(id: number): number {
     return edges.value.filter(
-      (e) => e.from_kind === "task" && e.to_kind === "task" && e.from_id === id
+      (e) => e.kind === "decompose" && e.from_kind === "task" && e.to_kind === "task" && e.to_id === id
     ).length;
   }
 

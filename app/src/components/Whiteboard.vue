@@ -718,7 +718,7 @@ async function commitTaskTitle(t: Task) {
   }
 }
 
-// ---- 任务就地编辑：标题 + 备注，全在卡片里写，不弹窗 ----
+// ---- 任务就地编辑：标题 + 任务说明，全在卡片里写，不弹窗 ----
 const editingTaskFull = ref<number | null>(null);
 const taskDraftTitle = ref("");
 const taskDraftDesc = ref("");
@@ -4461,7 +4461,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
           <textarea
             v-model="taskDraftDesc"
             class="tn-desc-input"
-            placeholder="在这里写说明 / 备注…"
+            placeholder="在这里写任务说明（点 AI 时就是任务要求）…"
             @keydown.esc="cancelEditTaskFull"
           ></textarea>
           <div class="tn-edit-actions">
@@ -4541,7 +4541,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
               📝
             </button>
           <button
-            title="就地编辑标题和备注（不弹窗）"
+            title="就地编辑标题和任务说明（不弹窗）"
             @pointerdown.stop
             @click.stop="startEditTaskFull(t)"
           >

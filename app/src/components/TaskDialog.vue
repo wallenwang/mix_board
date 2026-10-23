@@ -12,6 +12,8 @@ const props = defineProps<{ modelValue: boolean; task: Task }>();
 const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
 const store = useBoardStore();
 
+import { DELIVER_OPTIONS } from "../aiPrompt";
+
 const title = ref("");
 const description = ref("");
 const priority = ref(2);
@@ -26,23 +28,55 @@ const composingTag = ref(false);
 const newTagName = ref("");
 const newTagColor = ref(TAG_COLORS[0]);
 
+function fillFromTask() {
+  const t = props.task;
+  if (!t) return;
+  title.value = t.title;
+  description.value = t.description;
+  priority.value = t.priority;
+  startDate.value = t.start_date ?? null;
+  dueDate.value = t.due_date ? t.due_date.slice(0, 10) : null;
+  done.value = !!t.completed_at;
+  progress.value = done.value ? 100 : (t.progress ?? 0);
+  selectedTags.value = [...t.tags];
+  composingTag.value = false;
+  newTagName.value = "";
+}
+
+// ⚠️ 必须 immediate：白板里这个弹窗是 v-if 延迟挂载的，挂载时 modelValue 已为 true，
+// 普通 watch 捕不到「关→开」的变化，弹窗打开就是一屏空白（用户报的"点详情没用"）。
 watch(
-  () => props.modelValue,
-  (open) => {
-    if (open && props.task) {
-      title.value = props.task.title;
-      description.value = props.task.description;
-      priority.value = props.task.priority;
-      startDate.value = props.task.start_date ?? null;
-      dueDate.value = props.task.due_date ? props.task.due_date.slice(0, 10) : null;
-      done.value = !!props.task.completed_at;
-      progress.value = done.value ? 100 : (props.task.progress ?? 0);
-      selectedTags.value = [...props.task.tags];
-      composingTag.value = false;
-      newTagName.value = "";
-    }
-  }
+  () => [props.modelValue, props.task?.id] as const,
+  ([open]) => {
+    if (open) fillFromTask();
+  },
+  { immediate: true }
 );
+
+/** 详情区：这条任务在结构里的位置（只读，跟给 AI 的指令同一套数据口径） */
+const relations = computed(() => {
+  const t = props.task;
+  if (!t) return null;
+  const titleOf = (id: number) => store.allTasks.find((x) => x.id === id)?.title ?? "（已删除）";
+  const num = store.numberOf(t.id);
+  const parent = store.taskParentOf.get(t.id);
+  const kids = store.edges
+    .filter((e) => e.kind === "decompose" && e.from_kind === "task" && e.to_kind === "task" && e.to_id === t.id)
+    .map((e) => e.from_id);
+  const prev = store.edges
+    .filter((e) => e.kind === "precede" && e.to_kind === "task" && e.to_id === t.id)
+    .map((e) => e.from_id);
+  const next = store.edges
+    .filter((e) => e.kind === "precede" && e.from_kind === "task" && e.from_id === t.id)
+    .map((e) => e.to_id);
+  const refs = store.refsOfTask(t.id).map((r) => ({
+    name: store.notes.find((n) => n.id === r.note_id)?.text ?? "资料",
+    level: r.level,
+    point: r.point,
+  }));
+  const fmt = DELIVER_OPTIONS.find((o) => o.key === (t.deliver_fmt || "").toLowerCase());
+  return { num, parent, kids, prev, next, refs, fmt };
+});
 
 /** 编辑时就能看到这张卡会是什么颜色、还剩几天 */
 const preview = computed(() => {
@@ -50,6 +84,11 @@ const preview = computed(() => {
   const u = urgencyOf(fake);
   return { u, color: URGENCY_COLOR[u], text: urgencyText(fake), left: daysLeft(dueDate.value) };
 });
+
+/** 模板里显示任务名用 */
+function titleOf2(id: number) {
+  return store.allTasks.find((x) => x.id === id)?.title ?? "（已删除）";
+}
 
 const canSave = computed(() => title.value.trim() !== "");
 
@@ -120,18 +159,71 @@ async function createTag() {
     append-to-body
   >
     <div style="display: flex; flex-direction: column; gap: 16px">
+      <!-- 只读的结构信息：这条任务在哪、靠什么支撑、交给谁 -->
+      <div v-if="relations" class="rel-box">
+        <div class="rel-row">
+          <span class="rel-k">编号</span>
+          <span class="rel-v">
+            <b v-if="relations.num" class="rel-num">T{{ relations.num }}</b>
+            <span v-else class="rel-empty">尚未编号</span>
+            <span v-if="relations.fmt" class="rel-fmt">交付格式：{{ relations.fmt.label }}</span>
+            <span v-else class="rel-empty">未指定交付格式</span>
+          </span>
+        </div>
+        <div v-if="relations.parent" class="rel-row">
+          <span class="rel-k">所属任务</span>
+          <span class="rel-v">T{{ store.numberOf(relations.parent) }} {{ titleOf2(relations.parent) }}</span>
+        </div>
+        <div v-if="relations.kids.length" class="rel-row">
+          <span class="rel-k">下级任务</span>
+          <span class="rel-v">
+            <span v-for="k in relations.kids" :key="k" class="rel-chip"
+              >T{{ store.numberOf(k) }} {{ titleOf2(k) }}</span
+            >
+          </span>
+        </div>
+        <div v-if="relations.prev.length" class="rel-row">
+          <span class="rel-k">前置任务</span>
+          <span class="rel-v">
+            <span v-for="k in relations.prev" :key="k" class="rel-chip"
+              >T{{ store.numberOf(k) }} {{ titleOf2(k) }}</span
+            >
+          </span>
+        </div>
+        <div v-if="relations.next.length" class="rel-row">
+          <span class="rel-k">后续任务</span>
+          <span class="rel-v">
+            <span v-for="k in relations.next" :key="k" class="rel-chip"
+              >T{{ store.numberOf(k) }} {{ titleOf2(k) }}</span
+            >
+          </span>
+        </div>
+        <div v-if="relations.refs.length" class="rel-row">
+          <span class="rel-k">依据材料</span>
+          <span class="rel-v">
+            <span v-for="(r, i) in relations.refs" :key="i" class="rel-chip">
+              <i class="rel-lv" :class="'lv-' + r.level"></i>{{ r.name }}
+              <em v-if="r.point" class="rel-point">{{ r.point }}</em>
+            </span>
+          </span>
+        </div>
+      </div>
+
       <div>
         <div class="field-label">标题</div>
         <el-input v-model="title" placeholder="任务标题" maxlength="200" />
       </div>
 
       <div>
-        <div class="field-label">描述</div>
+        <div class="field-label">
+          任务说明
+          <span class="field-hint">卡片上显示的正文；点「AI」生成指令时，它就是「任务要求」</span>
+        </div>
         <el-input
           v-model="description"
           type="textarea"
           :rows="4"
-          placeholder="补充说明（可选）"
+          placeholder="这个任务要做什么，写清楚一点"
         />
       </div>
 
@@ -228,6 +320,88 @@ async function createTag() {
   font-size: 13px;
   color: var(--text-subtle);
   margin-bottom: 6px;
+}
+.field-hint {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+/* 只读的结构信息：这条任务在哪、靠什么支撑、交给谁 */
+.rel-box {
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--fill-weak, rgb(0 0 0 / 3%));
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 12px;
+}
+.rel-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.rel-k {
+  flex: 0 0 56px;
+  color: var(--text-subtle);
+}
+.rel-v {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.7;
+  color: var(--text);
+}
+.rel-num {
+  margin-right: 10px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--accent-soft, rgb(64 158 255 / 12%));
+  color: var(--accent);
+}
+.rel-fmt {
+  margin-left: 10px;
+  color: var(--text-subtle);
+}
+.rel-empty {
+  color: var(--text-faint);
+}
+.rel-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 2px 8px 2px 0;
+  padding: 1px 8px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+}
+.rel-point {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+  color: var(--text-subtle);
+}
+.rel-point::before {
+  content: "· ";
+}
+.rel-lv {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--text-faint);
+}
+.rel-lv.lv-0 {
+  background: #d9822b;
+}
+.rel-lv.lv-1 {
+  background: #3b7ddd;
+}
+.rel-lv.lv-2 {
+  background: #98a2b6;
 }
 .due-hint {
   display: flex;
