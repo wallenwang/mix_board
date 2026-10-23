@@ -490,14 +490,24 @@ async function applyPos(kind: string, id: number, p: { x: number; y: number }) {
  * 父子关系来自白板连线（from = 父，to = 子）：只有向下收集，
  * 所以拖父节点时下级跟着走，拖子节点时父节点不动；数据里有环也不会死循环。
  */
+/**
+ * 取出一组节点及其所有后代，用于「移动父节点时带着子节点一起走」。
+ *
+ * ⚠️ 分解边的方向是**子 → 父**（from 是子、to 是父），所以找后代要
+ * 反过来「顺着 to 找 from」。方向搞反会变成「移动子节点拖动整棵树」。
+ *
+ * 只顺着分解边走：移动任务不该把它的资料（依据）或前后环节（先后）一起拖走，
+ * 那些是独立摆放的东西。
+ */
 function withDescendants(roots: string[]): string[] {
   const all = new Set(roots);
   const queue = [...roots];
   while (queue.length) {
     const cur = queue.shift() as string;
     for (const e of store.edges) {
-      if (`${e.from_kind}:${e.from_id}` !== cur) continue;
-      const child = `${e.to_kind}:${e.to_id}`;
+      if (e.kind !== "decompose") continue;
+      if (`${e.to_kind}:${e.to_id}` !== cur) continue;
+      const child = `${e.from_kind}:${e.from_id}`;
       if (all.has(child)) continue;
       all.add(child);
       queue.push(child);
@@ -1576,10 +1586,16 @@ const linking = ref<{
 } | null>(null);
 const linkFrom = ref<{ kind: "task" | "note"; id: number } | null>(null);
 
-/** a 顺着连线能不能走到 b（判断新连线会不会绕成圈） */
+/**
+ * a 顺着连线能不能走到 b（判断新连线会不会绕成圈）。
+ *
+ * 分解边方向是子 → 父，所以这里走的是**向上的父级链**：
+ * 从 a 出发顺着 to 走，能到 b 就说明 b 是 a 的祖先。
+ */
 function reachable(aKind: string, aId: number, bKind: string, bId: number): boolean {
   const kids = new Map<string, { kind: string; id: number }[]>();
   for (const e of store.edges) {
+    // from 是子、to 是父：子的邻居是父
     const k = `${e.from_kind}:${e.from_id}`;
     const arr = kids.get(k);
     const v = { kind: e.to_kind as string, id: e.to_id };
@@ -1653,8 +1669,9 @@ async function connect(
       ElMessage.success("已反转上下级方向（箭头指向被支撑的一方）");
       return;
     }
-    // 会绕成圈：to 已经是 from 的上级，就不能再把 from 挂到它下面
-    if (reachable(toKind, to.id, from.kind, from.id)) {
+    // 会绕成圈：建「子 → 父」之前先看父的祖先链里有没有子。
+    // reachable 走的是向上的父级链，所以是 reachable(父, 子)。
+    if (reachable(from.kind, from.id, toKind, to.id)) {
       ElMessage.warning("这两个卡片已经在同一条上下级链上了，再连会绕成圈");
       return;
     }

@@ -140,6 +140,9 @@ export interface TreeEdge {
 
 /**
  * 把一串节点按「父子连线」排成从左到右的树。
+ *
+ * ⚠️ 边的方向是**子 → 父**（from 是子、to 是父），所以找子级要
+ * 「顺着 to 找 from」。父在左、子在右，跟白板上的收敛图一致。
  * 节点用字符串 key 标识（`task:3` / `note:5`），因为任务和便签的自增 id 会撞车。
  */
 export function layoutTree(
@@ -155,10 +158,11 @@ export function layoutTree(
 
   for (const e of edges) {
     if (!set.has(e.from) || !set.has(e.to)) continue;
-    const list = kids.get(e.from);
-    if (list) list.push(e.to);
-    else kids.set(e.from, [e.to]);
-    hasParent.add(e.to);
+    // from 是子、to 是父：父的子级列表里放 from
+    const list = kids.get(e.to);
+    if (list) list.push(e.from);
+    else kids.set(e.to, [e.from]);
+    hasParent.add(e.from);
   }
 
   const roots = keys.filter((k) => !hasParent.has(k));
