@@ -1167,6 +1167,33 @@ function onCustomColor(n: BoardNote, e: Event) {
   if (v) void setNoteColor(n, v);
 }
 
+/**
+ * 人工审核：未审 → 通过 → 打回 → 未审，点一下走一格。
+ *
+ * 为什么要有这个：AI 拿到的材料里，有的是自己刚上传还没看的，有的是已经核对过的。
+ * 让 AI 自己去判断「这份能不能信」很容易过度自信；人标一下最省事 ——
+ * 通过的在指令里写「已人工审核确认」，打回的直接不进指令。
+ */
+async function cycleReview(n: BoardNote) {
+  const next = n.review === "passed" ? "rejected" : n.review === "rejected" ? "" : "passed";
+  try {
+    await api.updateNote(n.id, { review: next });
+    n.review = next;
+    // ⚠️ 光改对象属性不一定能刷出徽标（review 是后加的可选字段），
+    //    跟改 meta 一样重新拉一次白板数据最稳，代价只有一次小查询。
+    await store.refreshBoard();
+    ElMessage.success(
+      next === "passed"
+        ? "已标为「审核通过」：进 AI 指令时会注明已人工确认"
+        : next === "rejected"
+          ? "已标为「打回」：这份材料不会再进 AI 指令"
+          : "已回到「未审」"
+    );
+  } catch (e) {
+    reportError("改审核状态", e);
+  }
+}
+
 /* ------------------------------------------------------------------
  * 节点外观：形状 / 圆角
  * 存在 board_notes.meta.look 里 —— 不新建表、不改 Rust 侧结构。
@@ -2110,16 +2137,13 @@ const visibleEdgeGeom = computed(() =>
      */
     const p1 = portAnchor(fk, e.from_id, "out");
     const p2 = portAnchor(tk, e.to_id, "in");
-    // ⚠️ 端点外退一点，但**不能太多**：12px 时箭头离卡片太远，看着线根本没连上；
-    //    6px 时箭头又和卡片圆角、端口圆点叠在一起，尖端像是插进卡里。
-    //    9px ≈ 端口圆点的外沿 + 卡片投影，箭头正好完整露在卡片外面。
-    const ARROW_GAP = 9;
-    const out = p2.x < b.x ? -ARROW_GAP : ARROW_GAP;
-    const p2o = { x: p2.x + out, y: p2.y };
-    // 起点同样退一点点：不退的话线头钻进卡片背景里，看着像被节点"吃掉"一截
-    const START_GAP = 3;
-    const outS = p1.x < a.x ? -START_GAP : START_GAP;
-    const p1o = { x: p1.x + outS, y: p1.y };
+    /**
+     * 端点就落在端口圆心上（卡片边缘），**一点不退**：
+     * 以前退 9px 是给箭头腾地方，箭头拆掉之后线头再退就成了「线没接上」。
+     * 端口圆点本来就压在边缘上，正好把线头收进去，看着是接住的。
+     */
+    const p2o = { x: p2.x, y: p2.y };
+    const p1o = { x: p1.x, y: p1.y };
     // 同一个列间隙里往往并排好几条线，按 id 给每条一个固定的小横向偏移，
     // 让它们各走各的（偏移量只跟 id 有关，所以重排、刷新都不会跳）
     const bias = ((e.id * 37) % 7) * 3 - 9;
@@ -5065,55 +5089,25 @@ const numOf = (t: Task) => store.numberOf(t.id);
             </label>
           </div>
         </div>
+        <!-- 分组框也有端口：整组作为依据/产物时，线直接连到框上（一条线管整组） -->
+        <span
+          class="node-port out"
+          title="输出端口（左侧）：整组的产出从这里出去，连到上级就表示这一组都是它的依据"
+          @pointerdown="startLinkPort($event, 'note', n.id, 'out')"
+        ></span>
+        <span
+          class="node-port in"
+          title="输入端口（右侧）：整组在这里接收下级交上来的产出"
+          @pointerdown="startLinkPort($event, 'note', n.id, 'in')"
+        ></span>
         <span class="node-resize" title="拖动改大小" @pointerdown="startResizeNode($event, n)"></span>
       </div>
 
-      <!-- 连线：两端吸附在卡片边框上，不画进卡片内部；箭头指向下级 -->
+      <!-- 连线：两端落在端口圆点上，不画进卡片内部（左出右进，不画箭头） -->
       <svg class="wb-edges">
-        <defs>
-          <!-- 箭头颜色必须跟着线走：marker 不继承 stroke，只能一种关系一个 -->
-          <marker
-            v-for="mk in ['decompose', 'precede', 'evidence', 'produce']"
-            :id="'wb-arrow-' + mk"
-            :key="mk"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerUnits="userSpaceOnUse"
-            markerWidth="10"
-            markerHeight="10"
-            orient="auto-start-reverse"
-          >
-            <path :class="'mk-' + mk" d="M0 0 L10 5 L0 10 z" />
-          </marker>
-          <!-- 档位箭头：强 / 参考 / 弱参考 三色（支撑类连线按档位走，不按类型走） -->
-          <marker
-            v-for="lv in [0, 1, 2]"
-            :id="'wb-arrow-lv' + lv"
-            :key="'lv' + lv"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerUnits="userSpaceOnUse"
-            markerWidth="10"
-            markerHeight="10"
-            orient="auto-start-reverse"
-          >
-            <path :class="'mk-lv' + lv" d="M0 0 L10 5 L0 10 z" />
-          </marker>
-          <marker
-            id="wb-arrow-live"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerUnits="userSpaceOnUse"
-            markerWidth="10"
-            markerHeight="10"
-            orient="auto-start-reverse"
-          >
-            <path d="M0 0 L10 5 L0 10 z" />
-          </marker>
-        </defs>
+        <!-- 不再画箭头：方向由端口约定（左出右进）+ 线的走向表达，
+             箭头只是多余的墨点。导出的 PNG/PDF 里没有端口控件，
+             改由 exportImage.ts 在线的两头画小圆点补足方向信息。 -->
         <g v-for="g in visibleEdgeGeom" :key="g.e.id">
           <path
             class="edge-line"
@@ -5123,9 +5117,6 @@ const numOf = (t: Task) => store.numberOf(t.id);
               { picked: edgePick && edgePick.id === g.e.id },
             ]"
             :d="g.d"
-            :marker-end="
-              g.lv >= 0 ? 'url(#wb-arrow-lv' + g.lv + ')' : 'url(#wb-arrow-' + g.e.kind + ')'
-            "
           />
           <path class="edge-hit" :d="g.d" @click.stop="openEdgeMenu(g.e, $event)" />
         </g>
@@ -5134,7 +5125,6 @@ const numOf = (t: Task) => store.numberOf(t.id);
           class="edge-line linking"
           :class="linking.role"
           :d="linkingPathD"
-          marker-end="url(#wb-arrow-live)"
         />
       </svg>
 
@@ -5421,6 +5411,22 @@ const numOf = (t: Task) => store.numberOf(t.id);
           </template>
         </template>
 
+        <!-- 人工审核状态：常显在卡片左上角，一眼看出哪些材料已经过过人眼 -->
+        <span
+          v-if="n.review"
+          class="node-review"
+          :class="'rv-' + n.review"
+          :title="
+            n.review === 'passed'
+              ? '已人工审核通过：进 AI 指令时会标注「已人工确认」。点一下改成打回'
+              : '已打回：这份材料不会进 AI 指令。点一下回到未审'
+          "
+          @pointerdown.stop
+          @click.stop="cycleReview(n)"
+        >
+          {{ n.review === "passed" ? "✓ 已通过" : "✗ 打回" }}
+        </span>
+
         <!-- 悬浮操作 -->
         <div class="node-tools">
           <template v-if="kindOf(n) === 'doc'">
@@ -5530,6 +5536,19 @@ const numOf = (t: Task) => store.numberOf(t.id);
               @click.stop="cycleRadius(n)"
             >
               <AppIcon name="shapeRound" :size="13" />
+            </button>
+            <button
+              class="rv-btn"
+              :class="{ on: n.review === 'passed', bad: n.review === 'rejected' }"
+              :title="
+                '人工审核：现在是' +
+                (n.review === 'passed' ? '已通过' : n.review === 'rejected' ? '已打回' : '未审') +
+                '。点一下切换：未审 → 通过 → 打回'
+              "
+              @pointerdown.stop
+              @click.stop="cycleReview(n)"
+            >
+              审
             </button>
             <button title="编辑文字" @pointerdown.stop @click.stop="startEditNote(n)">✎</button>
             <button
@@ -6411,13 +6430,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
   overflow: visible;
   pointer-events: none;
 }
-/* 连线：细实线 + 末端箭头，方向一眼可读（from = 上级 → to = 下级） */
-#wb-arrow path {
-  fill: var(--text-faint);
-}
-#wb-arrow-live path {
-  fill: var(--accent);
-}
+/* 连线：细实线，方向靠端口（左出右进）读，不再画箭头 */
 /* 工具栏图标按含义上色：绿=内容、紫=结构、琥珀=时间、蓝=连接。
    只改图标颜色，按钮的底色和选中态都不动，避免整条工具栏变花。 */
 .tb .app-icon.ico-upload,
@@ -7224,6 +7237,42 @@ html.dark .box-cluster.cs-weak {
 .node-tools button.on {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* ---------- 人工审核标记 ----------
+   常显在卡片左上角：这堆材料哪些已经过人眼、哪些被打回，扫一眼就知道。
+   颜色走 --ok / --danger 两个语义色，深浅主题自动跟着变。 */
+.node-review {
+  position: absolute;
+  top: -9px;
+  left: 8px;
+  z-index: 6;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}
+.node-review.rv-passed {
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 18%, var(--bg-elevated));
+  color: var(--ok);
+}
+.node-review.rv-rejected {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, var(--bg-elevated));
+  color: var(--danger);
+}
+.node-tools button.rv-btn.on {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--ok);
+}
+.node-tools button.rv-btn.bad {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
 }
 
 /* ---------- 色板 ----------

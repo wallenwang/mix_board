@@ -160,6 +160,7 @@ const real = {
       meta?: string;
       role?: string;
       group_kind?: string;
+      review?: string;
     }
   ) => invoke<void>("update_note", { id, patch }),
   deleteNote: (id: number) => invoke<void>("delete_note", { id }),
@@ -298,6 +299,9 @@ const real = {
   // settings
   getSettings: () => invoke<{ theme: string }>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting_kv", { key, value }),
+  getSetting: (key: string) => invoke<string>("get_setting_kv", { key }),
+  /** 每天自动备份：今天备过就返回空串，备了则返回一句人话说明 */
+  autoBackup: () => invoke<string>("auto_backup"),
 
   // diagnostics
   diagLog: (message: string) => invoke<void>("diag_log", { message }),

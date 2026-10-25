@@ -7,17 +7,35 @@
  *  · 通过 ACP（stdin/stdout 的 nd-JSON，规范强制 UTF-8）把指令发出去；
  *  · AI 把产物写进 out/，我们扫目录回收 —— 比从 stdout 里抠 Markdown 稳得多。
  *
- * ⚠️ 进度用**两条路**读：正常走 ai-event 事件；如果事件订阅失败（Tauri 2 里
- *    core:event 权限没给到，listen 会直接 reject），自动退化成轮询 ai_status。
- *    早先只依赖事件，一旦权限缺失就是「点了发送、界面一直转圈」，还看不出原因。
+ * ⚠️ 状态**不再住在这里**：全部搬进 aiRuns.ts 的运行池，一个任务一个 run。
+ *    这个文件里的 aiPhase / aiText / … 只是「当前弹窗里那个任务」的**只读视图**，
+ *    关掉弹窗不影响 run，发下一个任务也不会清空上一个。
+ *
+ * ⚠️ 进度用**两条路**读：正常走 ai-event 事件；订阅失败（core:event 权限没给到）
+ *    自动退化成轮询 ai_status。早先只依赖事件，一旦权限缺失就是「点了发送、
+ *    界面一直转圈」，还看不出原因。
  */
-import { ref } from "vue";
+import { computed, shallowRef } from "vue";
 import { ElMessage } from "element-plus";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api, isTauri } from "./api";
 import type { AiBackend, AiImported, AiModel, AiOutput } from "./types";
 import { useBoardStore } from "./store";
 import { focusOnBoard } from "./uiBus";
+import { aiPromptTaskId } from "./aiPrompt";
+import {
+  ensureBridge,
+  ensureRun,
+  finishRun,
+  forgetRun,
+  isBusy,
+  notifyDone,
+  pushRunLog,
+  runOf,
+  stamp,
+  startTicker,
+  viewing,
+  type AiRun,
+} from "./aiRuns";
 
 const LS_BACKEND = "ai.backend";
 const LS_MODEL = "ai.model";
@@ -27,52 +45,48 @@ const LS_RUN = "ai.lastRun";
 export const AI_OUT_MIME = "application/x-ai-output";
 
 /** 探测到的 agent 命令行 */
-export const aiBackends = ref<AiBackend[]>([]);
-/** idle 空闲 / preparing 准备目录 / running 跑着 / done 完成 / error 出错 */
-export const aiPhase = ref<"idle" | "preparing" | "running" | "done" | "error">("idle");
-export const aiText = ref("");
-export const aiLog = ref<string[]>([]);
-export const aiOutputs = ref<AiOutput[]>([]);
-export const aiWorkDir = ref("");
-export const aiError = ref("");
+export const aiBackends = shallowRef<AiBackend[]>([]);
+
+/** 当前后端能选的模型（来自 agent 会话的 configOptions） */
+export const aiModels = shallowRef<AiModel[]>([]);
+
+// ------------------------------------------------------------ 当前弹窗任务的可读视图
+
+/** 弹窗正在看哪个任务 */
+export const currentRun = computed<AiRun | null>(() => {
+  const pid = useBoardStore().currentProjectId;
+  return runOf(pid, aiPromptTaskId.value);
+});
+
+/**
+ * idle 空闲 / preparing 准备目录 / running 跑着 / done 完成 / error 出错
+ * 只反映「当前看的这个任务」，别的任务跑它的，互不影响。
+ */
+export const aiPhase = computed<"idle" | "preparing" | "running" | "done" | "error">(
+  () => currentRun.value?.phase ?? "idle"
+);
+export const aiText = computed(() => currentRun.value?.text ?? "");
+export const aiLog = computed(() => currentRun.value?.log ?? []);
+export const aiOutputs = computed(() => currentRun.value?.outputs ?? []);
+export const aiWorkDir = computed(() => currentRun.value?.workDir ?? "");
+export const aiError = computed(() => currentRun.value?.error ?? "");
 /** 恢复出来的是哪一轮的结果（"10-25 00:12"），空=这一轮是刚跑的 */
-export const aiLastAt = ref("");
-
-let runId = "";
-let stop: UnlistenFn | null = null;
-let pollTimer: number | null = null;
-
-function pushLog(s: string) {
-  const line = s.trim();
-  if (!line) return;
-  aiLog.value.push(line.length > 160 ? line.slice(0, 160) + "…" : line);
-  if (aiLog.value.length > 200) aiLog.value.splice(0, aiLog.value.length - 200);
-}
+export const aiLastAt = computed(() => currentRun.value?.at ?? "");
 
 /** 同时写一份到 diag.log：用户说"点了没反应"时，一行就能看出断在哪一步 */
 function dlog(m: string) {
-  pushLog(`· ${m}`);
+  const r = currentRun.value;
+  if (r) pushRunLog(r, `· ${m}`);
   api.diagLog?.(`AI ${m}`).catch(() => {});
 }
 
-function stopPoll() {
-  if (pollTimer != null) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
-  }
+/** 清理当前任务的运行记录（只清不跑的；正在跑的必须先中止） */
+export function resetRun() {
+  const store = useBoardStore();
+  forgetRun(store.currentProjectId, aiPromptTaskId.value);
 }
 
-export function resetRun() {
-  stopPoll();
-  aiPhase.value = "idle";
-  aiText.value = "";
-  aiLog.value = [];
-  aiOutputs.value = [];
-  aiError.value = "";
-  aiWorkDir.value = "";
-  aiLastAt.value = "";
-  runId = "";
-}
+// ------------------------------------------------------------ 上一轮结果快照
 
 /** 一次跑完的结果快照 */
 interface RunSnap {
@@ -81,10 +95,6 @@ interface RunSnap {
   model: string;
   text: string;
   outputs: AiOutput[];
-}
-
-function runKey(pid: number, taskId: number | null): string {
-  return `${pid}:${taskId ?? 0}`;
 }
 
 function readSnaps(): Record<string, RunSnap> {
@@ -97,19 +107,19 @@ function readSnaps(): Record<string, RunSnap> {
 
 /** 某个任务上一次跑完的快照（没有就 null） */
 export function lastRunOf(pid: number, taskId: number | null): RunSnap | null {
-  const s = readSnaps()[runKey(pid, taskId)];
+  const s = readSnaps()[`${pid}:${taskId ?? 0}`];
   return s && s.workDir ? s : null;
 }
 
-function rememberRun(pid: number, taskId: number | null, text: string) {
-  if (!aiWorkDir.value) return;
+function rememberRun(run: AiRun) {
+  if (!run.workDir) return;
   const all = readSnaps();
-  all[runKey(pid, taskId)] = {
-    workDir: aiWorkDir.value,
-    at: stamp(),
+  all[run.key] = {
+    workDir: run.workDir,
+    at: run.at || stamp(),
     model: savedModel(),
-    text: text.slice(0, 4000),
-    outputs: aiOutputs.value,
+    text: run.text.slice(0, 4000),
+    outputs: run.outputs,
   };
   // 只留最近 30 条，别把 localStorage 撑爆
   const keys = Object.keys(all);
@@ -122,36 +132,59 @@ function rememberRun(pid: number, taskId: number | null, text: string) {
 }
 
 /**
- * 打开弹窗时调用：把同一个任务**上一轮跑完**的结果恢复出来。
- * 常见诉求是"我点进去想再看看上一轮的产物" —— 重跑一遍又慢又费钱。
- * 恢复后仍会重扫一遍 workDir：文件被删了就如实说没有，不假装还在。
+ * 打开弹窗时调用。
+ *
+ * 三种情况，顺序很重要：
+ *  ① 池里已经有这个任务的 run（在跑 / 刚跑完）→ **原样接着看**，一个字都不清；
+ *  ② 池里没有，但有上一轮快照 → 恢复成一条 done 的 run（重扫 workDir，文件没了就如实说）；
+ *  ③ 都没有 → 什么都不做，等用户点发送。
  */
 export async function openRunFor(taskId: number | null): Promise<void> {
-  resetRun();
   const pid = useBoardStore().currentProjectId;
   if (pid == null || taskId == null) return;
+
+  const live = runOf(pid, taskId);
+  if (live) {
+    viewing.value = live.key;
+    live.unread = false;
+    if (live.workDir && !live.outputs.length) await refreshOutputs(live);
+    if (isBusy(live)) dlog("接着看正在跑的这一轮");
+    return;
+  }
+
   const snap = lastRunOf(pid, taskId);
   if (!snap) return;
-  aiWorkDir.value = snap.workDir;
-  aiText.value = snap.text || "";
-  aiOutputs.value = snap.outputs ?? [];
-  aiLastAt.value = snap.at || "";
-  aiPhase.value = "done";
-  await refreshOutputs();
-  if (!aiOutputs.value.length) {
-    aiError.value = "上次的工作目录已经不在了（可能被删，或换过数据目录）";
+  const title =
+    useBoardStore().allTasks.find((t) => t.id === taskId)?.title ?? `任务 ${taskId}`;
+  const r = ensureRun(pid, taskId, title);
+  r.workDir = snap.workDir;
+  r.text = snap.text || "";
+  r.outputs = snap.outputs ?? [];
+  r.phase = "done";
+  r.at = snap.at || "";
+  r.restored = true;
+  r.startedAt = Date.now() - 1000;
+  r.endedAt = Date.now();
+  viewing.value = r.key;
+  await refreshOutputs(r);
+  if (!r.outputs.length) {
+    r.error = "上次的工作目录已经不在了（可能被删，或换过数据目录）";
     dlog("恢复上次结果失败：工作目录不在了");
   } else {
-    dlog(`已恢复上次结果（${snap.at}）：${aiOutputs.value.length} 份产物`);
+    dlog(`已恢复上次结果（${snap.at}）：${r.outputs.length} 份产物`);
   }
 }
+
+// ------------------------------------------------------------ 后端探测 / 偏好
 
 /** 探测本机装了哪些 agent CLI */
 export async function detectBackends(): Promise<AiBackend[]> {
   try {
     const list = await api.aiDetectBackends();
     aiBackends.value = list ?? [];
-    dlog(`探测到 ${aiBackends.value.length} 个 CLI：${aiBackends.value.map((b) => b.name).join("、") || "无"}`);
+    dlog(
+      `探测到 ${aiBackends.value.length} 个 CLI：${aiBackends.value.map((b) => b.name).join("、") || "无"}`
+    );
   } catch (e) {
     aiBackends.value = [];
     dlog(`探测失败：${String(e)}`);
@@ -172,9 +205,6 @@ export function saveModel(m: string) {
   localStorage.setItem(LS_MODEL, m);
 }
 
-/** 当前后端能选的模型（来自 agent 会话的 configOptions） */
-export const aiModels = ref<AiModel[]>([]);
-
 /**
  * 拉一次模型列表。
  * ⚠️ 只是为了给用户一个正确的下拉；就算拉失败也不影响发送 ——
@@ -182,8 +212,7 @@ export const aiModels = ref<AiModel[]>([]);
  */
 export async function loadModels(): Promise<void> {
   const b = pickBackend();
-  // ⚠️ isTauri 是布尔常量（api.ts: export const isTauri = hasTauri），不是函数，
-  //    写成 isTauri() 会抛 "is not a function" —— 打开弹窗时就炸。
+  // ⚠️ isTauri 是布尔常量（api.ts: export const isTauri = hasTauri），不是函数
   if (!b || !isTauri) {
     aiModels.value = [];
     return;
@@ -224,48 +253,57 @@ function withDeliveryRules(brief: string, dir: string): string {
   ].join("\n");
 }
 
-/** 把 agent 的原始报错翻译成「下一步该点哪里」 */
-function humanize(raw: string): string {
-  const t = (raw || "").trim();
-  if (/free usage limit|usage limit reached/i.test(t)) {
-    return (
-      "这个模型的免费额度用完了（opencode 自带的免费模型有次数上限）。\n" +
-      "两种解法：① 在上面的「模型」下拉里选一个你自己配了 key 的模型（如 deepseek/DeepSeek V4.1 Flash）；" +
-      "② 去 opencode 桌面版里 Connect provider 或订阅 Go 套餐。\n" +
-      "原始报错：" + t
-    );
-  }
-  if (/no api key|invalid api key|unauthorized|401/i.test(t)) {
-    return "这个模型没有可用的 key：先在 opencode 桌面版里连上 provider，再换模型。\n原始报错：" + t;
-  }
-  return t;
-}
-
 export interface SendResult {
   ok: boolean;
   error?: string;
 }
 
-/** 把当前这份指令发出去，等它跑完。过程会实时写进 aiText / aiLog */
-export async function sendToAi(brief: string, title: string, taskId: number | null): Promise<SendResult> {
+/**
+ * 把这份指令发出去。**发出去就返回**，不等它跑完 ——
+ * 所以用户可以连着发好几个任务，也可以立刻关掉窗口去干别的。
+ * 跑完会由运行池发一条右下角通知，产物随时能在「AI 任务」面板里看。
+ */
+export async function sendToAi(
+  brief: string,
+  title: string,
+  taskId: number | null
+): Promise<SendResult> {
   const store = useBoardStore();
   const pid = store.currentProjectId;
   if (pid == null) return { ok: false, error: "还没选项目" };
 
   const backend = pickBackend();
   if (!backend) {
-    dlog("发送中止：没有可用的后端");
     return {
       ok: false,
       error: "没找到可用的 AI 命令行。先装 OpenCode 桌面版（自带 CLI），或在设置里指定路径。",
     };
   }
 
-  resetRun();
+  const run = ensureRun(pid, taskId, title);
+
+  // 同一个任务重复发：先把上一轮掐掉，否则两个进程抢同一个 out/ 目录
+  if (isBusy(run) && run.runId) {
+    await api.aiCancel(run.runId).catch(() => {});
+  }
+
+  // 清成新的一轮（只清自己这条，别人的 run 一根头发都不动）
+  run.runId = "";
+  run.text = "";
+  run.log = [];
+  run.outputs = [];
+  run.error = "";
+  run.phase = "preparing";
+  run.startedAt = Date.now();
+  run.endedAt = 0;
+  run.at = "";
+  run.unread = false;
+  run.restored = false;
+  viewing.value = run.key;
+
   try {
     // 1) 准备工作目录：把指令和参考材料摆好
-    aiPhase.value = "preparing";
-    dlog(`开始：${backend.name} ${backend.version} → ${backend.exe}`);
+    pushRunLog(run, `开始：${backend.name} ${backend.version} → ${backend.exe}`);
     const assetIds: number[] = [];
     if (taskId != null) {
       for (const r of store.refsOfTask(taskId)) {
@@ -274,44 +312,21 @@ export async function sendToAi(brief: string, title: string, taskId: number | nu
       }
     }
     const prep = await api.aiPrepare(pid, title, brief, assetIds);
-    aiWorkDir.value = prep.dir;
-    dlog(`工作目录就绪：${prep.dir}（参考材料 ${assetIds.length} 份）`);
+    run.workDir = prep.dir;
+    pushRunLog(run, `工作目录就绪：${prep.dir}（参考材料 ${assetIds.length} 份）`);
 
-    // 2) run_id 由前端生成：这样 listen 的时候就知道自己是哪个 run，
+    // 2) run_id 由前端生成：这样订阅的时候就知道自己是哪个 run，
     //    不会漏掉刚起跑那几十毫秒里发出的事件
     const rid = `ai${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-    runId = rid;
+    run.runId = rid;
 
-    // 3) 监听事件（失败不致命，下面会退化成轮询）
-    if (isTauri) {
-      stop?.();
-      stop = null;
-      try {
-        stop = await listen<{ run_id: string; kind: string; text: string }>("ai-event", (ev) => {
-          const p = ev.payload;
-          if (p.run_id !== runId) return;
-          if (p.kind === "chunk") aiText.value += p.text;
-          else if (p.kind === "log") pushLog(p.text);
-          else if (p.kind === "done") {
-            aiText.value = p.text || aiText.value;
-            if (aiPhase.value !== "error") aiPhase.value = "done";
-            dlog("收到 done 事件");
-            finish();
-          } else if (p.kind === "error") {
-            aiError.value = humanize(p.text);
-            aiPhase.value = "error";
-            dlog(`收到 error 事件：${p.text}`);
-            finish();
-          }
-        });
-        dlog("事件通道已订阅");
-      } catch (e) {
-        dlog(`事件订阅失败，改用轮询：${String(e)}`);
-      }
-    }
+    // 3) 事件通道（全局只订阅一次，按 run_id 分发到各自的 run）
+    const gotEvents = await ensureBridge();
+    pushRunLog(run, gotEvents ? "事件通道已订阅" : "事件订阅不上，改用轮询兜底");
+    startTicker();
 
     // 4) 起跑
-    aiPhase.value = "running";
+    run.phase = "running";
     await api.aiStart({
       run_id: rid,
       exe: backend.exe,
@@ -321,72 +336,46 @@ export async function sendToAi(brief: string, title: string, taskId: number | nu
       model: savedModel(),
       title,
     });
-    dlog("已下发，等 AI 干活");
+    pushRunLog(run, "已下发，等 AI 干活（关掉这个窗口也不会停）");
 
-    // 5) 无论事件通道有没有订阅上，都开一条慢轮询兜底：
-    //    事件是"立刻知道"的快路，轮询是"一定知道"的保险。两边写的是同一份状态，
-    //    重复应用不会出错（只是把同一段文字再赋一次值）。
-    pollTimer = window.setInterval(() => void pullStatus(), 1500);
-    void pullStatus();
+    // 5) 收尾放在后台：不挡用户去发下一个
+    void follow(run);
 
-    // 等结果：done / error 会把 phase 改掉
-    await waitPhase();
-    finish();
-    dlog(`结束：${aiPhase.value}${aiError.value ? " / " + aiError.value : ""}`);
-
-    // 兜底：模型只回文字不肯写文件时，把回复存成 out/AI 回复.md，组里至少有一张卡。
-    // （只在 out/ 是空的时候写，否则每次都会多出一张重复的"AI 回复"卡）
-    await refreshOutputs();
-    // ⚠️ 取一份副本再判断：TS 会把上面 `aiPhase.value = "running"` 的窄化一路带下来，
-    //    直接比较 "done"/"error" 会被判成"两个类型没有交集"，把这段兜底当成死代码。
-    const finalPhase: string = aiPhase.value;
-    if (finalPhase === "done" && !aiOutputs.value.length && aiWorkDir.value && aiText.value.trim()) {
-      await api.aiSaveReply(aiWorkDir.value, aiText.value).catch(() => "");
-      await refreshOutputs();
-    }
-    dlog(`收到 ${aiOutputs.value.length} 份产物`);
-    // 记一份，下次点同一个任务的 AI 时能直接看到这些产物
-    if (aiWorkDir.value) rememberRun(pid, taskId, aiText.value);
-
-    return finalPhase === "error" ? { ok: false, error: aiError.value } : { ok: true };
+    return { ok: true };
   } catch (e) {
-    aiPhase.value = "error";
-    aiError.value = humanize(String(e));
-    dlog(`异常：${String(e)}`);
-    finish();
+    pushRunLog(run, `异常：${String(e)}`);
+    finishRun(run, "error", String(e));
     return { ok: false, error: String(e) };
   }
 }
 
-/** 从后端拉一次状态（事件通道的备份） */
-async function pullStatus() {
-  if (!runId) return;
-  try {
-    const st = await api.aiStatus(runId);
-    // 事件通道可能已经把更新的字推过来了，别用稍旧的快照把它盖回去（会闪、会回退）
-    if (st.text && st.text.length > aiText.value.length) aiText.value = st.text;
-    if (st.phase === "done") {
-      if (aiPhase.value !== "error") aiPhase.value = "done";
-      finish();
-    } else if (st.phase === "error") {
-      aiError.value = humanize(st.error || "AI 那边出错了");
-      aiPhase.value = "error";
-      finish();
-    }
-  } catch {
-    /* 单次查询失败不算错，下一轮再试 */
+/** 起跑之后的收尾：等结束 → 扫产物 → 兜底存回复 → 记快照 → 通知 */
+async function follow(run: AiRun) {
+  await waitRunDone(run);
+
+  await refreshOutputs(run);
+  // 兜底：模型只回文字不肯写文件时，把回复存成 out/AI 回复.md，组里至少有一张卡。
+  // （只在 out/ 是空的时候写，否则每次都会多出一张重复的"AI 回复"卡）
+  const phase: string = run.phase;
+  if (phase === "done" && !run.outputs.length && run.workDir && run.text.trim()) {
+    await api.aiSaveReply(run.workDir, run.text).catch(() => "");
+    await refreshOutputs(run);
   }
+  pushRunLog(run, `收到 ${run.outputs.length} 份产物`);
+  rememberRun(run);
+  notifyDone(run);
 }
 
-function waitPhase(): Promise<void> {
+/** 等这个 run 收工（最多 30 分钟） */
+function waitRunDone(run: AiRun): Promise<void> {
   return new Promise((res) => {
+    if (!isBusy(run)) return res();
     const t = setInterval(() => {
-      if (aiPhase.value === "done" || aiPhase.value === "error") {
+      if (!isBusy(run)) {
         clearInterval(t);
         res();
       }
-    }, 120);
-    // 兜底：最多等 30 分钟
+    }, 150);
     setTimeout(() => {
       clearInterval(t);
       res();
@@ -394,30 +383,35 @@ function waitPhase(): Promise<void> {
   });
 }
 
-function finish() {
-  stop?.();
-  stop = null;
-  stopPoll();
-  if (aiPhase.value === "running" || aiPhase.value === "preparing") aiPhase.value = "done";
-}
-
 /** 扫一遍 out/ 目录，把产物列出来 */
-async function refreshOutputs() {
-  if (!aiWorkDir.value) return;
+async function refreshOutputs(run: AiRun | null) {
+  if (!run?.workDir) return;
   try {
-    aiOutputs.value = (await api.aiCollectOutputs(aiWorkDir.value)) ?? [];
+    run.outputs = (await api.aiCollectOutputs(run.workDir)) ?? [];
   } catch {
-    aiOutputs.value = [];
+    run.outputs = [];
   }
 }
 
-export function cancelRun() {
-  if (runId) void api.aiCancel(runId).catch(() => {});
-  aiPhase.value = "error";
-  aiError.value = "已中止";
-  dlog("用户中止");
-  finish();
+/** 中止某个任务（不传就是当前弹窗那个） */
+export function cancelRun(taskId?: number | null) {
+  const store = useBoardStore();
+  const tid = taskId === undefined ? aiPromptTaskId.value : taskId;
+  const run = runOf(store.currentProjectId, tid);
+  if (!run) return;
+  if (run.runId) void api.aiCancel(run.runId).catch(() => {});
+  pushRunLog(run, "用户中止");
+  finishRun(run, "error", "已中止");
 }
+
+/** 给「AI 任务」面板用：重新扫某个 run 的产物 */
+export async function refreshRunOutputs(taskId: number | null) {
+  const store = useBoardStore();
+  const run = runOf(store.currentProjectId, taskId);
+  if (run) await refreshOutputs(run);
+}
+
+export { isBusy };
 
 // ------------------------------------------------------------ 产物上白板
 
@@ -484,12 +478,6 @@ function imageSize(url: string): Promise<{ w: number; h: number } | null> {
   });
 }
 
-function stamp(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 /**
  * 把 out/ 里的产物收进资料库，在白板上用一个**分组框**装起来。
  * 组不跟任务连线（它就是一份成果集），名字里带上任务和时间，方便事后找。
@@ -500,11 +488,14 @@ export async function placeOutputsOnBoard(
 ): Promise<number> {
   const store = useBoardStore();
   const pid = store.currentProjectId;
-  if (pid == null || !aiWorkDir.value) return 0;
+  const tid = taskId ?? aiPromptTaskId.value;
+  const run = runOf(pid, tid);
+  const workDir = run?.workDir ?? aiWorkDir.value;
+  if (pid == null || !workDir) return 0;
 
-  const imported: AiImported[] = await api.aiImportOutputs(pid, aiWorkDir.value);
+  const imported: AiImported[] = await api.aiImportOutputs(pid, workDir);
   if (!imported.length) {
-    aiError.value = "out 目录里还没有文件。可以让 AI 再跑一次，或自己打开目录看看。";
+    if (run) run.error = "out 目录里还没有文件。可以让 AI 再跑一次，或自己打开目录看看。";
     dlog("打组失败：out 里没有文件");
     return 0;
   }
@@ -570,7 +561,7 @@ export async function placeOutputsOnBoard(
     h: Math.round(boxH),
     file_id: null,
     // role=output 让白板把框头换成绿标「产物」，也不再显示强度档位
-    meta: JSON.stringify({ role: "output", task_id: taskId, at: stamp() }),
+    meta: JSON.stringify({ role: "output", task_id: tid, at: stamp() }),
   });
 
   for (let ri = 0; ri < rows.length; ri++) {
@@ -595,9 +586,9 @@ export async function placeOutputsOnBoard(
 
   // 组连回任务：这是「产物」关系（绿线），箭头指向任务。
   // ⚠️ 绝不能写成 decompose —— 产物不会让任务变成它的下级。
-  if (taskId != null && boxId) {
+  if (tid != null && boxId) {
     try {
-      await api.createEdge(pid, "note", boxId, "task", taskId, "produce");
+      await api.createEdge(pid, "note", boxId, "task", tid, "produce");
     } catch {
       /* 已经连过就算了 */
     }

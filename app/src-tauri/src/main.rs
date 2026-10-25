@@ -129,6 +129,24 @@ fn main() {
                 };
             }
 
+            // 每天第一次启动时自动备份一次库 —— **放在后端做，不靠界面触发**。
+            // 之前是前端 onMounted 末尾调一次命令，实测打包版里一次都没生成过 `备份/`：
+            // 备份属于后端自己的活儿，只要界面那边有任何一步没走到（加载报错、
+            // invoke 被拒、catch 吞掉错误），用户就永远没有备份，而且毫无感知。
+            // 放后台线程跑：VACUUM 每个库要几百毫秒，别占首屏时间。
+            {
+                let broot = root.clone();
+                std::thread::spawn(move || {
+                    let line = match commands::do_auto_backup(&broot) {
+                        Ok(msg) if msg.is_empty() => return, // 今天已备过，不写日志
+                        Ok(msg) => format!("BACKUP OK {msg}"),
+                        Err(e) => format!("BACKUP FAIL {e}"),
+                    };
+                    // 走 perf.log（跟启动耗时同一个通道，打包版确认可写）
+                    diag::append(&broot.join("perf.log"), &line);
+                });
+            }
+
             // 自检用：KANBAN_DEBUG_FLOAT=1 时启动就开一个浮动网页，把结果写进 diag.log。
             // 平时不设这个变量，什么都不做（留着是为了以后排查"网页打不开"类问题）。
             if std::env::var("KANBAN_DEBUG_FLOAT").ok().as_deref() == Some("1") {
@@ -258,7 +276,7 @@ fn main() {
             agent::ai_cancel,
             agent::ai_collect_outputs, agent::ai_save_reply, agent::ai_status,
             commands::list_tags, commands::create_tag, commands::delete_tag,
-            commands::get_settings, commands::set_setting_kv, commands::bootstrap,
+            commands::get_settings, commands::set_setting_kv, commands::get_setting_kv, commands::bootstrap,
             commands::set_task_pos,
             commands::list_notes, commands::create_note, commands::update_note,
             commands::delete_note,
@@ -273,7 +291,7 @@ fn main() {
             commands::find_asset_by_hash,
             commands::list_docs, commands::create_doc, commands::update_doc, commands::delete_doc,
             commands::get_data_dir, commands::open_data_dir,
-            commands::show_main_window, commands::perf_probe,
+            commands::show_main_window, commands::perf_probe, commands::auto_backup,
             commands::float_web_open, commands::float_web_bounds,
             commands::float_web_navigate, commands::float_web_visible,
             commands::float_web_close, commands::float_web_set_zoom,

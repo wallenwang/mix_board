@@ -20,6 +20,7 @@ import ExportMenu from "./components/ExportMenu.vue";
 import FilterBar from "./components/FilterBar.vue";
 import TrashDialog from "./components/TrashDialog.vue";
 import AiPromptDialog from "./components/AiPromptDialog.vue";
+import AiRunsPanel from "./components/AiRunsPanel.vue";
 import NewTaskInline from "./components/NewTaskInline.vue";
 import { runSelfTest, reportError } from "./diag";
 
@@ -382,6 +383,11 @@ watch([aiFloatOpen], () => {
 });
 
 onMounted(async () => {
+  // 启动阶段埋点：`perf_probe` 是**直接 invoke**，不像 rAF 探针那样会被
+  // 「窗口被遮挡」骗停。启动要是卡死在某一步，perf.log 里这几个 STAGE
+  // 能直接指出停在哪一行，比盯着黑屏猜快得多。
+  const mark = (m: string) => void api.perfProbe(`STAGE ${m}`);
+  mark("enter");
   // 开发时先跑一遍真实后端链路自检，故障会落进 diag.log。
   // ⚠️ **生产版不要跑**：它会在用户库里建一个「__自检__」项目再删掉，
   //    中途任何一步失败就会在左侧留下一个垃圾项目（历史上已经攒了 5 个）。
@@ -390,8 +396,10 @@ onMounted(async () => {
   try {
     await store.loadBootstrap();
     store.applyTheme();
+    mark("bootstrap ok");
   } catch (e) {
     bootError.value = e instanceof Error ? e.message : String(e);
+    mark(`bootstrap FAIL ${bootError.value.slice(0, 200)}`);
     reportError("启动加载", e);
   } finally {
     // ⚠️ 关键：**启动画面要一直盖到界面真的画出来**。
@@ -408,12 +416,20 @@ onMounted(async () => {
           sp.classList.add("gone");
           window.setTimeout(() => sp.remove(), 320);
         }
-        void api.diagLog(
+        // ⚠️ 走 perf_probe 而不是 diag_log：diag_log 在打包版里写不进 diag.log
+        //    （原因未明），而 perf_probe 走的是同一条 append，实测可写。
+        void api.perfProbe(
           `BOOTPERF ready=${performance.now().toFixed(0)}ms (bootstrap@${tBoot.toFixed(0)}ms)`
         );
       });
     });
   }
+  mark("splash gone");
+  // 每天一次的自动备份**不在前端做**：由 Rust 启动流程开后台线程直接跑
+  // （见 src-tauri/src/main.rs 的 setup）。前端触发过一次实测在打包版里
+  // 一次都没成功，而且失败被 catch 吞得干干净净 —— 这种"必须有"的事
+  // 不能寄在界面有没有跑到那一行上。
+
   // 启动后 6 秒的帧率探针：统计掉帧次数与最长卡顿，落进 perf.log。
   // 以后再有人说"卡"，直接看这两个数就知道是渲染问题还是系统问题。
   let frames = 0;
@@ -429,7 +445,7 @@ onMounted(async () => {
     if (gap > maxGap) maxGap = gap;
     if (now < tBoot + 6000) requestAnimationFrame(probe);
     else {
-      void api.diagLog(
+      void api.perfProbe(
         `BOOTPERF frames=${frames} slow=${slow} maxGap=${maxGap.toFixed(0)}ms`
       );
     }
@@ -456,7 +472,7 @@ onMounted(async () => {
     po.observe({ entryTypes: ["longtask"] });
     window.setTimeout(() => {
       po.disconnect();
-      void api.diagLog(
+      void api.perfProbe(
         `LONG count=${tasks.length} list=${tasks.slice(0, 10).join(" | ") || "none"}`
       );
     }, 10000);
@@ -871,6 +887,8 @@ watch(
   <TrashDialog v-model="trashOpen" />
   <!-- 给 AI 的指令：白板任务卡与看板卡片都走这一个弹窗 -->
   <AiPromptDialog />
+  <!-- 右下角 AI 任务池入口：关掉指令弹窗后，这里能看全部在跑/跑完的任务 -->
+  <AiRunsPanel />
   <NewTaskInline v-if="store.currentProject" v-model="newTaskOpen" :column-id="newTaskColId" />
 
   <!-- 浮动 AI 网页面板：位置/尺寸都记住 -->

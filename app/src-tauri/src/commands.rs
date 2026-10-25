@@ -842,6 +842,14 @@ pub fn set_setting_kv(global: State<GlobalDb>, key: String, value: String) -> Re
     set_setting(&conn, &key, &value)
 }
 
+/// 读一条全局设置（没有就返回空串）。
+/// 用在「项目角色卡」这类按项目存的文本上：key = `persona.<项目 id>`。
+#[tauri::command]
+pub fn get_setting_kv(global: State<GlobalDb>, key: String) -> Result<String, String> {
+    let conn = global.0.lock().map_err(map_err)?;
+    Ok(get_setting(&conn, &key)?.unwrap_or_default())
+}
+
 #[derive(Serialize)]
 pub struct Bootstrap {
     pub projects: Vec<Project>,
@@ -917,10 +925,12 @@ pub struct NoteOut {
     pub role: String,
     /// 特殊分组类型：candidates 候选组 / versions 版本组，空 = 普通分组
     pub group_kind: String,
+    /// 人工审核状态："" 没审 / pending 待审 / passed 通过 / rejected 打回
+    pub review: String,
 }
 
 const NOTE_SELECT: &str =
-    "SELECT id,project_id,x,y,text,color,kind,w,h,file_id,meta,role,group_kind FROM board_notes";
+    "SELECT id,project_id,x,y,text,color,kind,w,h,file_id,meta,role,group_kind,review FROM board_notes";
 
 fn row_to_note(r: &Row) -> rusqlite::Result<NoteOut> {
     Ok(NoteOut {
@@ -937,6 +947,7 @@ fn row_to_note(r: &Row) -> rusqlite::Result<NoteOut> {
         meta: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
         role: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
         group_kind: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+        review: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
     })
 }
 
@@ -1000,6 +1011,8 @@ pub struct NotePatch {
     pub meta: Option<String>,
     pub role: Option<String>,
     pub group_kind: Option<String>,
+    /// 人工审核状态："" / pending / passed / rejected
+    pub review: Option<String>,
 }
 
 #[tauri::command]
@@ -1028,6 +1041,7 @@ pub fn update_note(db: State<Db>, id: i64, patch: NotePatch) -> Result<(), Strin
     push!(patch.meta, "meta");
     push!(patch.role, "role");
     push!(patch.group_kind, "group_kind");
+    push!(patch.review, "review");
 
     if sets.is_empty() {
         return Ok(());
@@ -2006,6 +2020,116 @@ pub fn perf_probe(dir: State<DataDir>, line: String) -> Result<(), String> {
     let p = dir.root().join("perf.log");
     crate::diag::append(&p, &line);
     Ok(())
+}
+
+/// 每天自动备份：把每个库用 `VACUUM INTO` 拍一份干净快照，存到 `<数据目录>/备份/<日期>/`。
+///
+/// 为什么只备份库、不整份拷数据目录：附件和 .md 正文都是普通文件，整份拷一次动辄
+/// 几百 MB 到几个 G，每天做一遍不现实。真正「一改坏就全丢」的是库里的结构 ——
+/// 任务、白板节点、连线、三档依据、文档索引全在这里，所以先把库救下来；
+/// 文件名保留「项目文件夹名」，出事了一眼知道该往回捡哪一个。
+///
+/// 保留最近 7 天，更早的整个目录删掉。同一天重复调用直接返回空串（不重复备份）。
+#[tauri::command]
+pub fn auto_backup(dir: State<DataDir>) -> Result<String, String> {
+    do_auto_backup(&dir.root())
+}
+
+/// 真正的备份逻辑（单独拆出来是为了能在单测里直接喂一个临时目录，
+/// 也为了让启动流程能直接在后台线程里调它 —— 见 `main.rs` 的 setup）
+pub(crate) fn do_auto_backup(root: &std::path::Path) -> Result<String, String> {
+    let root = root.to_path_buf();
+    let gpath = root.join(GLOBAL_DB_NAME);
+    if !gpath.exists() {
+        return Ok(String::new());
+    }
+    // 日期直接从 SQLite 取，省得为一行日期引一个时间库
+    let today: String = {
+        let c = Connection::open(&gpath).map_err(map_err)?;
+        c.query_row("SELECT date('now','localtime')", [], |r| r.get(0))
+            .map_err(map_err)?
+    };
+    let bak_root = root.join("备份");
+    let today_dir = bak_root.join(&today);
+    if today_dir.is_dir() {
+        let done = std::fs::read_dir(&today_dir)
+            .map(|it| {
+                it.flatten().any(|e| {
+                    e.path()
+                        .extension()
+                        .map(|x| x.eq_ignore_ascii_case("db"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if done {
+            return Ok(String::new());
+        }
+    }
+    std::fs::create_dir_all(&today_dir).map_err(map_err)?;
+
+    // 要备份的库：根目录的全局库 + 每个项目文件夹里的项目库
+    let mut jobs: Vec<(std::path::PathBuf, String)> = vec![(gpath, "项目列表".to_string())];
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if p.file_name().map(|n| n == "备份").unwrap_or(false) {
+                continue; // 别把备份目录又备份一遍
+            }
+            let db = p.join(PROJECT_DB_NAME);
+            if db.is_file() {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "项目".into());
+                jobs.push((db, name));
+            }
+        }
+    }
+
+    let mut n = 0usize;
+    for (src, name) in jobs {
+        let target = today_dir.join(format!("{}.db", backup_name(&name)));
+        if target.exists() {
+            continue;
+        }
+        // VACUUM INTO 出来的是一份整理过的单文件快照：不依赖 -wal/-shm，
+        // 也不会像直接拷文件那样拷到「写了一半」的状态
+        let ok = Connection::open(&src)
+            .and_then(|c| c.execute("VACUUM INTO ?1", params![target.to_string_lossy().to_string()]))
+            .is_ok();
+        if ok {
+            n += 1;
+        }
+    }
+
+    // 清老备份：目录名就是日期，按名字排序即按时间排序，只留最近 7 个
+    if let Ok(rd) = std::fs::read_dir(&bak_root) {
+        let mut days: Vec<std::path::PathBuf> =
+            rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        days.sort();
+        while days.len() > 7 {
+            let old = days.remove(0);
+            let _ = std::fs::remove_dir_all(old);
+        }
+    }
+    Ok(format!("{n} 个库已备份到 备份/{today}"))
+}
+
+/// 备份文件名：项目名里可能有空格和各种符号，只把路径分隔符这类换掉
+fn backup_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 // ---------------- 浮动网页（子 webview，不是 iframe） ----------------
@@ -3384,6 +3508,43 @@ mod tests {
         e2.push((t(11), t(21))); // T1.1 → T2.1（旁系依据，合法）
         // 想再连 T2.1 → T1.1：从 T1.1 能顺着这条边走到 T2.1，所以判成环
         assert!(reaches(&e2, &t(11), &t(21)), "旁系连上后，反方向必须判成环");
+    }
+
+    /// 自动备份：全局库 + 每个项目库各拍一份，同一天不重复，最多留 7 天
+    #[test]
+    fn auto_backup_snapshots_every_db_and_keeps_a_week() {
+        let root = tmp_dir("backup");
+        std::fs::create_dir_all(root.join("项目A")).unwrap();
+        {
+            let g = Connection::open(root.join(GLOBAL_DB_NAME)).unwrap();
+            g.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+                .unwrap();
+            let p = Connection::open(root.join("项目A").join(PROJECT_DB_NAME)).unwrap();
+            p.execute_batch("CREATE TABLE t(x);").unwrap();
+        }
+        // 先摆 8 个「更早的备份」，验证清理只留 7 天
+        for d in 1..=8 {
+            std::fs::create_dir_all(root.join("备份").join(format!("2020-01-0{d}"))).unwrap();
+        }
+
+        let msg = do_auto_backup(&root).unwrap();
+        assert!(msg.contains("2 个库"), "应该备份全局库 + 项目库：{msg}");
+
+        let today: String = {
+            let c = Connection::open(root.join(GLOBAL_DB_NAME)).unwrap();
+            c.query_row("SELECT date('now','localtime')", [], |r| r.get(0))
+                .unwrap()
+        };
+        let dir = root.join("备份").join(&today);
+        assert!(dir.join("项目列表.db").is_file(), "全局库快照没生成");
+        assert!(dir.join("项目A.db").is_file(), "项目库快照没生成");
+
+        let days = std::fs::read_dir(root.join("备份")).unwrap().count();
+        assert_eq!(days, 7, "备份目录应该只留 7 天，实际 {days}");
+
+        // 同一天再跑一次：直接跳过，别把磁盘写满
+        assert_eq!(do_auto_backup(&root).unwrap(), "", "同一天不该重复备份");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

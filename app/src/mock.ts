@@ -61,6 +61,20 @@ function log(cmd: string, args?: any) {
   console.log("[mock]", cmd, args ?? "");
 }
 
+// ---------------------------------------------------------------
+// 浏览器预览用的「假 AI」运行
+// 真 CLI 只在桌面版里有。这里造一个会自己往前走的模拟 run，目的是让
+// 「同时发好几个任务 / 关掉弹窗还在跑 / 右下角 AI 任务面板」这些交互
+// 在浏览器里也能验（也方便截使用指南的图）。返回的文字都带「模拟」字样。
+const mockAiRuns = new Map<string, { t0: number; title: string }>();
+const MOCK_AI_TEXT = [
+  "（浏览器预览：这是模拟输出，不是真的 AI 结果）",
+  "已按指令整理出三部分内容：现状判断、可落地的动作、需要甲方确认的缺口。",
+  "第一部分 现状判断：目标客群的决策路径偏「先看案例再问价格」，现有物料缺少可对比的案例页。",
+  "第二部分 可落地的动作：先补两页案例对照，再把报价拆成三档给选择权。",
+  "第三部分 缺口：竞品价格带、门店实际动线图，这两项材料里没有，先按常见区间假设并标注。",
+].join("\n\n");
+
 const apiImpl = {
   async bootstrap() {
     log("bootstrap");
@@ -642,6 +656,14 @@ const apiImpl = {
     log("set_setting", { key, value });
     settings[key] = value;
   },
+  async getSetting(key: string) {
+    log("get_setting", { key });
+    return (settings as Record<string, string>)[key] || "";
+  },
+  async autoBackup() {
+    log("auto_backup");
+    return "";
+  },
 
   async diagLog(message: string) {
     console.log("[diag]", message);
@@ -711,20 +733,36 @@ const apiImpl = {
       { value: "deepseek/deepseek-flash", name: "DeepSeek Flash", free: true },
     ];
   },
-  async aiStart() {
-    throw new Error("浏览器预览模式不能调用本地 AI 命令行，请用桌面版（工作看板.exe）");
+  async aiStart(req: { run_id: string; title?: string }) {
+    log("aiStart", req.run_id);
+    mockAiRuns.set(req.run_id, { t0: Date.now(), title: req.title || "" });
+    return req.run_id;
   },
-  async aiStatus() {
-    return { phase: "error", text: "", error: "浏览器预览模式不能调用本地 AI 命令行" };
+  async aiStatus(runId: string) {
+    const r = mockAiRuns.get(runId);
+    if (!r) return { phase: "running" as const, text: "", error: "" };
+    const sec = (Date.now() - r.t0) / 1000;
+    if (sec >= 14) return { phase: "done" as const, text: MOCK_AI_TEXT, error: "" };
+    const paras = Math.max(1, Math.min(5, Math.floor(sec / 3) + 1));
+    return {
+      phase: "running" as const,
+      text: MOCK_AI_TEXT.split("\n\n").slice(0, paras).join("\n\n"),
+      error: "",
+    };
   },
-  async aiCancel() {
-    /* 空操作 */
+  async aiCancel(runId: string) {
+    mockAiRuns.delete(runId);
   },
-  async aiCollectOutputs() {
-    return [];
+  async aiCollectOutputs(dir: string) {
+    if (!dir.includes("浏览器预览")) return [];
+    return [
+      { name: "方案说明.md", path: dir + "out/方案说明.md", size: 3821 },
+      { name: "示意图.svg", path: dir + "out/示意图.svg", size: 10244 },
+    ];
   },
-  async aiPrepare(): Promise<{ dir: string; brief: string }> {
-    throw new Error("浏览器预览模式没有本地工作目录，请用桌面版");
+  async aiPrepare(_pid: number, title: string): Promise<{ dir: string; brief: string }> {
+    // 假目录：只要带「浏览器预览」字样，aiCollectOutputs 就认得出来
+    return { dir: `C:/浏览器预览/AI产出/${title || "任务"}/`, brief: "" };
   },
   async aiImportOutputs() {
     return [];

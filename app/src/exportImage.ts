@@ -250,25 +250,32 @@ function paintRing(
   ctx.restore();
 }
 
-/** 箭头：与屏幕 SVG marker 同尺寸（10×10 的三角） */
-function drawArrow(
+/**
+ * 端口小圆点：屏幕上的 `.node-port` 是操作控件，导出时会没了，
+ * 于是「哪头是出口、哪头是入口」在成品图里就看不出来。
+ * 这里按屏幕上的同款外观（13px 白底 + 2px 彩边 + 一圈底色补缝）把两头补回来。
+ */
+function drawPortDot(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  angle: number,
   color: string,
-  size = 11
+  bg: string
 ) {
+  const r = 6.5;
   ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
+  // 外圈底色：线压在卡片边缘时留个缺口，线头不至于糊进卡片里
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(-size, size * 0.46);
-  ctx.lineTo(-size, -size * 0.46);
-  ctx.closePath();
-  ctx.fillStyle = color;
+  ctx.arc(x, y, r + 2, 0, Math.PI * 2);
+  ctx.fillStyle = bg;
   ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = bg;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = color;
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -677,12 +684,16 @@ export function renderScene(scene: ExportScene, scale = 2, pad = 60): HTMLCanvas
     ctx.stroke(new Path2D(l.d));
   }
   ctx.setLineDash([]);
-  // 箭头单独一轮画，避免被后画的连线盖住
-  for (const l of scene.lines) drawArrow(ctx, l.x2, l.y2, l.angle, l.color);
 
   // 分组框画在节点底下
   for (const n of nodes) if (n.kind === "box") drawNode(ctx, n);
   for (const n of nodes) if (n.kind !== "box") drawNode(ctx, n);
+
+  // 端口小圆点画在最后：它压在卡片边缘上，画在卡片之前会被吃掉半截
+  for (const l of scene.lines) {
+    drawPortDot(ctx, l.x1, l.y1, l.color, scene.bg || "#ffffff");
+    drawPortDot(ctx, l.x2, l.y2, l.color, scene.bg || "#ffffff");
+  }
 
   return canvas;
 }

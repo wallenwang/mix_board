@@ -22,6 +22,7 @@
  */
 
 import { ref } from "vue";
+import { api } from "./api";
 import type { BoardEdge, BoardNote, Task, TaskRef, WbFile } from "./types";
 
 /* ------------------------------------------------------------------
@@ -29,6 +30,8 @@ import type { BoardEdge, BoardNote, Task, TaskRef, WbFile } from "./types";
  * ------------------------------------------------------------------ */
 export interface PromptStore {
   currentProject: { name: string } | null;
+  /** 角色卡按项目存，需要 id；老调用方不传也不影响（只是没有角色段） */
+  currentProjectId?: number | null;
   columns: { id: number; name: string }[];
   allTasks: Task[];
   notes: BoardNote[];
@@ -48,6 +51,44 @@ export const aiPromptTitle = ref("");
 /** 当前打开的是哪个任务（弹窗里改交付格式要写回它） */
 export const aiPromptTaskId = ref<number | null>(null);
 
+/**
+ * 项目级的「角色卡」：填一次，这个项目里所有任务的指令都会带上它。
+ *
+ * 为什么不自动判定角色：软件从任务标题里猜不出你是室内设计师还是品牌策划，
+ * 猜错比不填更糟（AI 会照着错误的专业口径写一整篇）。所以只做一件事 ——
+ * 让用户自己写两三句，写在项目层面，一次成本，全程复用。
+ * 存在全局设置里（key = `persona.<项目 id>`），跟数据目录一起走。
+ */
+export const projectPersona = ref("");
+/** 已经加载过角色卡的项目 id，避免每次开弹窗都读一遍磁盘 */
+let personaLoadedFor: number | null = null;
+
+export async function loadPersona(projectId: number | null): Promise<void> {
+  if (projectId == null) {
+    projectPersona.value = "";
+    personaLoadedFor = null;
+    return;
+  }
+  if (personaLoadedFor === projectId) return;
+  personaLoadedFor = projectId;
+  try {
+    projectPersona.value = (await api.getSetting(`persona.${projectId}`)) || "";
+  } catch {
+    projectPersona.value = "";
+  }
+}
+
+export async function savePersona(projectId: number | null, text: string): Promise<void> {
+  projectPersona.value = text;
+  if (projectId == null) return;
+  personaLoadedFor = projectId;
+  try {
+    await api.setSetting(`persona.${projectId}`, text);
+  } catch {
+    /* 存不上也不耽误这次生成：内存里已经有了 */
+  }
+}
+
 /** 交付格式选项：弹窗里的那排按钮和指令里的输出要求都读这一份 */
 export const DELIVER_OPTIONS = [
   { key: "word", label: "Word", desc: "文档，带标题层级" },
@@ -56,6 +97,7 @@ export const DELIVER_OPTIONS = [
   { key: "md", label: "Markdown", desc: "结构化纯文本" },
   { key: "html", label: "HTML", desc: "自包含网页" },
   { key: "sheet", label: "表格", desc: "一行一条记录" },
+  { key: "svg", label: "图表 SVG", desc: "用 SVG 代码画流程图 / 图表 / 示意图" },
 ] as const;
 
 export function openPrompt(store: PromptStore, taskId: number) {
@@ -65,6 +107,10 @@ export function openPrompt(store: PromptStore, taskId: number) {
   aiPromptText.value = buildTaskPrompt(store, taskId);
   aiPromptTitle.value = `给 AI 的指令 · T${store.numberOf(taskId)} ${t.title}`;
   aiPromptOpen.value = true;
+  // 角色卡是异步读的：先出指令，读到之后再刷一遍，免得第一次打开少了「你的角色」那段
+  void loadPersona(store.currentProjectId ?? null).then(() => {
+    if (aiPromptTaskId.value === taskId) aiPromptText.value = buildTaskPrompt(store, taskId);
+  });
 }
 
 /* ---------------- 材料 ---------------- */
@@ -156,6 +202,8 @@ interface RefRow {
   isDoc: boolean;
   /** 这条依据对这个任务的要点（用户写的一句话） */
   point: string;
+  /** 人工审核状态：passed 已确认 / "" 没审（rejected 的已经在收集时就剔掉了） */
+  review: string;
 }
 
 function collectRefs(store: PromptStore, taskId: number): RefRow[] {
@@ -163,6 +211,8 @@ function collectRefs(store: PromptStore, taskId: number): RefRow[] {
   for (const r of store.refsOfTask(taskId)) {
     const n = store.notes.find((x) => x.id === r.note_id);
     if (!n) continue;
+    // 打回的料不进指令：已经被否掉的东西，让 AI 当依据只会把错误放大一遍
+    if (n.review === "rejected") continue;
     const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
     rows.push({
       label: (n.text || f?.name || "未命名资料").trim(),
@@ -171,6 +221,7 @@ function collectRefs(store: PromptStore, taskId: number): RefRow[] {
       cluster: clusterOf(store, n),
       isDoc: n.kind === "doc",
       point: (r.point || "").trim(),
+      review: n.review || "",
     });
   }
   // 同一个任务里按等级排好，同级保持原有顺序
@@ -187,6 +238,8 @@ function refLine(r: RefRow): string {
     bits.push("站内文档");
   }
   if (r.cluster) bits.push(`分区「${r.cluster.name}」· ${CLUSTER_LABEL[r.cluster.key]}`);
+  // 已人工审核通过的资料单独标一句：AI 看到「人已经确认过」会更敢直接引用
+  if (r.review === "passed") bits.push("已人工审核确认");
   const head = bits.length ? `${r.label}（${bits.join("；")}）` : r.label;
   // 关注重点另起一行：混在文件名后面会被当装饰忽略
   return r.point ? `${head}\n   关注重点：${r.point}` : head;
@@ -402,6 +455,14 @@ const DELIVER_RULES: Record<string, string[]> = {
     "每列注明单位（如 mm、%、元），数值对齐，不要混用文字与数字描述同一类信息",
     "表前用一句话说明这张表统计的是什么、口径是什么",
   ],
+  svg: [
+    "输出一个独立的 .svg 文件（纯 SVG 代码，可直接用浏览器打开），不要用图片格式伪造",
+    "先保证「一眼看懂」：元素少而准，靠位置和连线表达关系，不要堆装饰",
+    "文字用 SVG 的 text 元素写在图里，字号不小于 12；中文不要用 textPath 绕弯",
+    "配色不超过 4 种，同一含义全图同色；线宽、圆角、间距保持统一",
+    "画布尺寸按内容定（如 1200×800），四周留白不少于 40，元素不要贴边",
+    "图下方留一行说明文字，写清这张图表达的是什么结论",
+  ],
 };
 
 /** 有图片资料时追加的图文要求 */
@@ -417,6 +478,7 @@ const DELIVER_NAME: Record<string, string> = {
   md: "Markdown 文本",
   html: "HTML 网页",
   sheet: "表格",
+  svg: "图表（SVG 矢量图）",
 };
 
 export function buildTaskPrompt(store: PromptStore, taskId: number): string {
@@ -442,6 +504,25 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   if (due) metaBits.push(due);
   if (t.completed_at) metaBits.push("状态 已完成");
   if (metaBits.length) out.push(metaBits.join("　｜　"));
+  out.push("");
+
+  /* 角色与开工规矩（不占正文章节号，放在最前面，AI 先看这两段） */
+  const persona = projectPersona.value.trim();
+  if (persona) {
+    out.push("【你的角色】");
+    out.push(persona);
+    out.push("");
+  }
+  out.push("【开工规矩】");
+  out.push(
+    "1. 你就是这份交付物的执行者：看完立刻开工，不要复述本指令，不要重述任务背景，不要问「需要我继续吗」。"
+  );
+  out.push(
+    "2. 开工前先在内部列一份执行计划（写给自己看，不必输出），再按计划逐项产出，不要一边想一边写。"
+  );
+  out.push(
+    "3. 每个交付物都要真正写成文件（工作目录见文末「交付方式」），写完再回复一段简短摘要：做了什么、文件叫什么。"
+  );
   out.push("");
 
   /* 一、任务要求 */
@@ -651,6 +732,12 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
     head("信息缺口");
     out.push("以下内容尚未确定，可能影响交付质量：");
     for (const g of gaps) out.push(`- ${g}`);
+    // 缺口不是让 AI 停下来追问的理由：这几处软件查得出来，AI 也补不上，
+    // 与其空转等回复，不如授权它按常理假设、把假设标出来，人再改。
+    out.push(
+      "这几处不要停下来问我，按已有材料做最合理的假设照常交付；" +
+        "凡是补出来的判断，在产出里用「假设：……」明确标出来，方便我事后核对修正。"
+    );
     out.push("");
   }
 

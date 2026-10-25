@@ -22,6 +22,9 @@ import {
   DELIVER_OPTIONS,
   buildTaskPrompt,
   copyText,
+  loadPersona,
+  projectPersona,
+  savePersona,
 } from "../aiPrompt";
 import {
   AI_OUT_MIME,
@@ -47,6 +50,7 @@ import {
   sendToAi,
 } from "../aiAgent";
 import { useBoardStore } from "../store";
+import { viewing } from "../aiRuns";
 
 const store = useBoardStore();
 const savingFmt = ref(false);
@@ -59,6 +63,26 @@ const currentFmt = computed(() => {
   const t = store.allTasks.find((x) => x.id === aiPromptTaskId.value);
   return (t?.deliver_fmt || "").toLowerCase();
 });
+
+/* ---- 角色卡：项目级，填一次所有任务通用 ---- */
+const personaOpen = ref(false);
+const personaDraft = ref("");
+
+function refreshPrompt() {
+  const id = aiPromptTaskId.value;
+  if (id != null) aiPromptText.value = buildTaskPrompt(store, id);
+}
+
+function togglePersona() {
+  personaOpen.value = !personaOpen.value;
+  if (personaOpen.value) personaDraft.value = projectPersona.value;
+}
+
+async function savePersonaNow() {
+  await savePersona(store.currentProjectId ?? null, personaDraft.value.trim());
+  refreshPrompt();
+  ElMessage.success("角色卡已保存，这个项目里所有任务的指令都会带上它");
+}
 
 /** 分组框的署名：任务编号 + 标题，事后一眼认得出是哪次产出 */
 const taskLabel = computed(() => {
@@ -90,9 +114,19 @@ const statusText = computed(() => {
 });
 
 watch(aiPromptOpen, (v) => {
-  if (!v) return;
-  // 先把同一个任务上一次跑完的结果恢复出来（resetRun 在它内部）
+  if (!v) {
+    // 关窗≠停任务：只是不再"看着"它，AI 还在后台跑；
+    // 下次点同一个任务的 AI 按钮会原样接回来（见 openRunFor 的注释）
+    viewing.value = "";
+    return;
+  }
+  // 池里已经跑过/正在跑就接着看，没有才去找上一轮快照
   void openRunFor(aiPromptTaskId.value);
+  // 角色卡读完再刷一遍指令，不然第一次打开会少了「你的角色」那两段
+  void loadPersona(store.currentProjectId ?? null).then(() => {
+    personaDraft.value = projectPersona.value;
+    refreshPrompt();
+  });
   void detectBackends().then(() => {
     if (!backendExe.value && aiBackends.value.length) {
       backendExe.value = aiBackends.value[0].exe;
@@ -152,7 +186,8 @@ async function doSend() {
     ElMessage.warning(r.error || "发送失败");
     return;
   }
-  ElMessage.success("跑完了，看看下面收到的产物");
+  // 已经发出去了，不等它跑完：可以立刻关窗去发别的任务
+  ElMessage.success("已发给 AI。现在可以关掉这个窗口去发别的任务，右下角「AI」里能看到全部进度。");
 }
 
 async function doPlace() {
@@ -208,6 +243,30 @@ function fmtSize(n: number) {
     <div class="ai-tip">
       下方就是发给 AI 的完整指令。可以复制走自己粘贴，也可以直接点「发送到 AI」，
       让本机装的 AI 命令行在后台跑完。
+    </div>
+
+    <!-- 角色卡：项目级，写一次所有任务通用。默认收起，不占地方 -->
+    <div class="ai-persona">
+      <button class="ai-persona-toggle" type="button" @click="togglePersona">
+        <span class="ai-persona-dot" :class="{ on: projectPersona.trim() }"></span>
+        角色卡
+        <span class="ai-persona-state">{{
+          projectPersona.trim() ? "已填写，本项目所有指令都带着它" : "未填写 —— 写两句，AI 的专业口径会稳很多"
+        }}</span>
+        <span class="ai-persona-caret" :class="{ open: personaOpen }">▾</span>
+      </button>
+      <div v-if="personaOpen" class="ai-persona-body">
+        <textarea
+          v-model="personaDraft"
+          class="ai-persona-text"
+          rows="3"
+          placeholder="例：你是品牌视觉设计总监，服务客户是「山茶间」中式茶饮；产出要能直接进教材当示例，风格克制、不用网络热词，中文标点用全角。"
+        ></textarea>
+        <div class="ai-persona-foot">
+          <span>这个项目里每个任务的指令都会带上一段，不用每个任务重复写</span>
+          <button class="ai-persona-save" type="button" @click="savePersonaNow">保存</button>
+        </div>
+      </div>
     </div>
 
     <div class="ai-fmt">
@@ -372,6 +431,87 @@ function fmtSize(n: number) {
   margin-left: 4px;
   font-size: 11px;
   color: var(--text-faint);
+}
+
+/* ---------- 角色卡（项目级，可折叠） ---------- */
+.ai-persona {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+.ai-persona-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ai-persona-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.ai-persona-dot.on {
+  background: var(--brand-2);
+}
+.ai-persona-state {
+  flex: 1;
+  color: var(--text-subtle);
+  font-size: 11px;
+}
+.ai-persona-caret {
+  transition: transform 0.16s var(--ease);
+}
+.ai-persona-caret.open {
+  transform: rotate(180deg);
+}
+.ai-persona-body {
+  padding: 0 10px 9px;
+}
+.ai-persona-text {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.7;
+  resize: vertical;
+}
+.ai-persona-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.ai-persona-save {
+  flex: none;
+  padding: 3px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-persona-save:hover {
+  background: var(--accent-hover);
 }
 
 .ai-backend {

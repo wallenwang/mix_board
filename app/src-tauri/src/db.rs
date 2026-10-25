@@ -199,6 +199,10 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     // 与特殊分组的类型（candidates 候选组 / versions 版本组）。留空即普通分组。
     add_note_col("role", "role TEXT NOT NULL DEFAULT ''")?;
     add_note_col("group_kind", "group_kind TEXT NOT NULL DEFAULT ''")?;
+    // Migration: 资料/产物的**人工审核状态**：空 = 没审 / pending 待审 /
+    // passed 通过 / rejected 打回。进 AI 指令时按它过滤 —— 通过的标注「已人工确认」，
+    // 打回的直接不进，省得 AI 拿被否掉的东西当依据。
+    add_note_col("review", "review TEXT NOT NULL DEFAULT ''")?;
     // Migration: 删除改成「进回收站」而不是直接抹掉。
     // 有值 = 在回收站里（时间戳），NULL = 正常卡片。到期由 purge_expired_notes 清。
     add_note_col("deleted_at", "deleted_at TEXT")?;

@@ -71,6 +71,8 @@ export interface BoardNote {
   role: string;
   /** 特殊分组：candidates 候选组 / versions 版本组，空 = 普通分组 */
   group_kind: string;
+  /** 人工审核状态："" 没审 / pending 待审 / passed 通过 / rejected 打回 */
+  review?: string;
   /** 有值 = 在回收站里（删除时间），null/缺省 = 正常卡片 */
   deleted_at?: string | null;
 }
