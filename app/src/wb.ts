@@ -230,26 +230,47 @@ export function clipToRect(c: Pt, toward: Pt, s: { w: number; h: number }): Pt {
   return { x: c.x + dx * k, y: c.y + dy * k };
 }
 
+export interface Size {
+  w: number;
+  h: number;
+}
+
+export interface EdgeCtx {
+  /** 横向错开量：同一个列间隙里常常并排好几条线，不错开会叠成一条粗线 */
+  bias?: number;
+  /** 指定的竖走线位置（一般不用，留给特殊场景） */
+  mx?: number;
+  /** 起点所在卡片的尺寸：反向绕行时用它判断"绕到卡片外面"要多远 */
+  s1?: Size;
+  /** 终点所在卡片的尺寸 */
+  s2?: Size;
+}
+
 /**
  * 连线路径 + 末端切线角。
  *
- * 直线：两个边界点直接连。
+ * 端口语义是固定的（全板统一）：**起点从左端口出、终点从右端口进**。
+ * 于是几何只有两种情形：
  *
- * 弧线：用**固定水平控制臂**的三次贝塞尔 —— 也就是思维导图那种 S 形：
- * 线先从卡片边缘水平走出去，中途拐弯，再水平进入目标卡片。
- * ⚠️ 不要用"沿出边法线外推"的写法：当两个卡片垂直堆叠时，法线方向和连线方向
- * 几乎重合，控制点共线，曲线就退化成直线了（手绘感全没了）。
- * 只有近乎垂直对齐（|dx| < 24）时才改用垂直臂，否则会绕出一个很怪的圈。
+ * 1. **顺向**（终点落在起点左边，父子左右排开）—— 思维导图那种 S 形：
+ *    用两个钉在同一条竖线上的控制点，线「水平出去 → 空隙里竖着走 → 水平进去」。
+ *    ⚠️ 别用"沿出边法线外推"：两卡垂直堆叠时法线与连线几乎重合，控制点共线，
+ *    曲线会退化成直线。
  *
- * 返回的 angle 是箭头方向（弧度）：直线取 p1→p2，曲线取终点控制点→终点
- * （即贝塞尔在 t=1 处的切线），所以箭头会顺着弧线"进"卡片，不会歪。
+ * 2. **反向**（终点落在起点右边，典型就是父子上下堆叠）—— 一条贝塞尔绕不出来，
+ *    必须绕到卡片外侧再折回来（见 loopGeom）。这不是"画得难看"，是端口语义的
+ *    必然结果：父的右端口本来就在子的左端口右边，线只能绕过子卡。
+ *
+ * 返回的 angle 是箭头方向（弧度），取终点控制点 → 终点（即 t=1 处的切线），
+ * 所以箭头会顺着弧线"进"卡片，不会歪。
  */
 export function edgeGeom(
   a: Pt,
   b: Pt,
   p1: Pt,
   p2: Pt,
-  style: EdgeStyle = "curve"
+  style: EdgeStyle = "curve",
+  ctx: EdgeCtx = {}
 ): { d: string; angle: number } {
   if (style === "line") {
     return {
@@ -259,31 +280,132 @@ export function edgeGeom(
   }
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
-  let c1x: number, c1y: number, c2x: number, c2y: number;
-  if (Math.abs(dx) < 24 && Math.abs(dy) > 24) {
-    // 几乎垂直：竖向 S
-    const k = Math.max(34, Math.min(130, Math.abs(dy) * 0.5));
-    const s = dy >= 0 ? 1 : -1;
-    c1x = p1.x;
-    c1y = p1.y + s * k;
-    c2x = p2.x;
-    c2y = p2.y - s * k;
-  } else {
-    // 常规：横向 S（臂长跟水平距离走，避免短连线绕成圈）
-    const k = Math.max(36, Math.min(140, Math.abs(dx) * 0.6));
-    const s = dx >= 0 ? 1 : -1;
-    c1x = p1.x + s * k;
-    c1y = p1.y;
-    c2x = p2.x - s * k;
-    c2y = p2.y;
+  // 落差可以忽略、方向也对：一条水平直线最清楚，箭头也最明确
+  if (Math.abs(dy) < 3 && dx <= 8) {
+    return { d: `M${p1.x},${p1.y} L${p2.x},${p2.y}`, angle: Math.atan2(0, dx) };
   }
+  if (dx > 8) return loopGeom(p1, p2, ctx);
+  const mx = ctx.mx ?? edgeMx(p1, p2, ctx.bias ?? 0);
   return {
-    d: `M${p1.x},${p1.y} C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`,
-    angle: Math.atan2(p2.y - c2y, p2.x - c2x),
+    d: `M${p1.x},${p1.y} C${mx},${p1.y} ${mx},${p2.y} ${p2.x},${p2.y}`,
+    angle: Math.atan2(0, p2.x - mx),
   };
+}
+
+/**
+ * 反向绕行：起点朝左出、终点要从右边进，但终点在起点右边。
+ *
+ * 走法（全程落在卡片外面，最后一段一定水平向左，箭头明确指向终点卡）：
+ *
+ *   左出去 → 竖向走到两卡之间的空档（没有空档就绕到父卡的反面）
+ *   → 横向穿到另一侧 → 竖向回到终点高度 → 水平向左插进终点卡
+ *
+ * 拐角用半径 34 的圆弧磨过，是一整条连续的曲线，不是方框。
+ * 横向只比卡片边缘多出 34px，尽量少占地方。
+ */
+function loopGeom(p1: Pt, p2: Pt, ctx: EdgeCtx) {
+  const h1 = ctx.s1?.h ?? 80;
+  const h2 = ctx.s2?.h ?? 80;
+  const arm = 34;
+  const r = 34;
+  let yc: number;
+  if (p2.y <= p1.y) {
+    // 父在上：两卡之间有空档就横穿空档，否则绕到子卡下方
+    const gap = p1.y - h1 / 2 - (p2.y + h2 / 2);
+    yc = gap >= 30 ? (p1.y - h1 / 2 + p2.y + h2 / 2) / 2 : p1.y + h1 / 2 + arm;
+  } else {
+    const gap = p2.y - h2 / 2 - (p1.y + h1 / 2);
+    yc = gap >= 30 ? (p2.y - h2 / 2 + p1.y + h1 / 2) / 2 : p1.y - h1 / 2 - arm;
+  }
+  const xL = Math.min(p1.x, p2.x) - arm;
+  const xR = Math.max(p1.x, p2.x) + arm;
+  const pts: Pt[] = [
+    p1,
+    { x: xL, y: p1.y },
+    { x: xL, y: yc },
+    { x: xR, y: yc },
+    { x: xR, y: p2.y },
+    p2,
+  ];
+  return { d: roundedPath(pts, r), angle: Math.atan2(0, -1) };
+}
+
+/**
+ * 圆角折线：把一串点连成一条路径，每个拐点切一段圆弧。
+ *
+ * 只在 loopGeom 里用（反向绕行）。半径会自动收缩到相邻两段较短那段的 1/2，
+ * 短段不会被切出反向的小钩；半径给得够大时看起来就是一整条连续的曲线。
+ */
+function roundedPath(pts: Pt[], r: number): string {
+  if (pts.length < 2) return "";
+  let d = `M${pts[0].x},${pts[0].y}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    const prev = pts[i - 1];
+    const next = pts[i + 1];
+    const v1 = { x: p.x - prev.x, y: p.y - prev.y };
+    const v2 = { x: next.x - p.x, y: next.y - p.y };
+    const l1 = Math.hypot(v1.x, v1.y) || 1;
+    const l2 = Math.hypot(v2.x, v2.y) || 1;
+    const rr = Math.min(r, l1 / 2, l2 / 2);
+    const pa = { x: p.x - (v1.x / l1) * rr, y: p.y - (v1.y / l1) * rr };
+    const pb = { x: p.x + (v2.x / l2) * rr, y: p.y + (v2.y / l2) * rr };
+    d += ` L${pa.x},${pa.y} Q${p.x},${p.y} ${pb.x},${pb.y}`;
+  }
+  const last = pts[pts.length - 1];
+  return `${d} L${last.x},${last.y}`;
+}
+
+/**
+ * 曲线的竖走线位置（两个控制点都在这条竖线上）。
+ *
+ * 两卡左右分得开（|dx| ≥ 64）→ 取中间那条列间隙的中线；
+ * 两卡几乎离得很近 → 没有间隙可用，从卡片外侧绕。
+ */
+export function edgeMx(p1: Pt, p2: Pt, bias = 0): number {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  let mx: number;
+  if (Math.abs(dx) >= 64) {
+    mx = p1.x + dx * 0.5;
+  } else {
+    const bulge = Math.max(70, Math.min(140, 170 - Math.abs(dy) * 0.3));
+    mx = dx >= 0 ? Math.max(p1.x, p2.x) + bulge : Math.min(p1.x, p2.x) - bulge;
+  }
+  return mx + bias;
 }
 
 /** 只要 path 字符串时用这个（屏幕侧 linkingPathD 之类） */
 export function edgePath(a: Pt, b: Pt, p1: Pt, p2: Pt, style: EdgeStyle = "curve"): string {
   return edgeGeom(a, b, p1, p2, style).d;
+}
+
+/**
+ * 圆角折线：一串点连成路径，每个拐点切一个小圆角。
+ *
+ * 远距离的连线（资料卡在最右、任务卡在最左，中间横着一整列卡片）用一条大 S
+ * 是绕不开的 —— 无论竖走线放在哪一列，1000px 高的竖段都会从卡片身上压过去，
+ * 于是线被卡片"切断"成两截。这种线改走正交通道：沿列间隙竖走、沿行间隙横走，
+ * 每段都在空白里，拐点用圆角磨软，看起来仍然是流畅的线，不是方框。
+ *
+ * 半径自动收缩到相邻两段较短那段的 1/2，短段不会被切出反向的小钩。
+ */
+export function roundedPolyline(pts: Pt[], r = 14): string {
+  if (pts.length < 2) return "";
+  let d = `M${pts[0].x},${pts[0].y}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    const prev = pts[i - 1];
+    const next = pts[i + 1];
+    const v1 = { x: p.x - prev.x, y: p.y - prev.y };
+    const v2 = { x: next.x - p.x, y: next.y - p.y };
+    const l1 = Math.hypot(v1.x, v1.y) || 1;
+    const l2 = Math.hypot(v2.x, v2.y) || 1;
+    const rr = Math.min(r, l1 / 2, l2 / 2);
+    const a = { x: p.x - (v1.x / l1) * rr, y: p.y - (v1.y / l1) * rr };
+    const b = { x: p.x + (v2.x / l2) * rr, y: p.y + (v2.y / l2) * rr };
+    d += ` L${a.x.toFixed(1)},${a.y.toFixed(1)} Q${p.x},${p.y} ${b.x.toFixed(1)},${b.y.toFixed(1)}`;
+  }
+  const last = pts[pts.length - 1];
+  return `${d} L${last.x},${last.y}`;
 }

@@ -74,6 +74,7 @@ async function quickDelete(e: Event) {
  */
 const press = { x: 0, y: 0, t: 0 };
 function onPressDown(e: PointerEvent) {
+  if (e.button !== 0) return; // 中键留给画布平移，别当成点击去开详情
   const el = e.target as HTMLElement | null;
   if (el?.closest("button")) return; // 勾选框 / 删除 / 编辑按钮自己处理
   press.x = e.clientX;

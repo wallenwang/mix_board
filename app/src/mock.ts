@@ -2,6 +2,7 @@
 // In the real desktop app, Tauri IS present and this file is never used.
 import {
   DEMO_PROJECT_NAME,
+  LEGACY_DEMO_NAMES,
   SEED_COUNTERS,
   seedColumns,
   seedDocs,
@@ -286,7 +287,8 @@ const apiImpl = {
 
   async listNotes(projectId: number) {
     log("list_notes", projectId);
-    return notes.filter((n) => n.project_id === projectId);
+    // 回收站里的卡片不再出现在白板上（软删除）
+    return notes.filter((n) => n.project_id === projectId && !n.deleted_at);
   },
   async createNote(note: any) {
     log("create_note", note);
@@ -315,6 +317,29 @@ const apiImpl = {
   },
   async deleteNote(id: number) {
     log("delete_note", id);
+    // 软删除：进回收站，30/60 天后由 purgeExpiredNotes 清
+    const n = notes.find((x) => x.id === id);
+    if (n) n.deleted_at = new Date().toISOString().slice(0, 19).replace("T", " ");
+  },
+  async listDeletedNotes() {
+    log("list_deleted_notes");
+    return notes
+      .filter((n) => n.deleted_at)
+      .map((n) => ({
+        id: n.id,
+        text: n.text,
+        kind: n.kind,
+        file_name: null,
+        deleted_at: n.deleted_at ?? null,
+      }));
+  },
+  async restoreNote(id: number) {
+    log("restore_note", id);
+    const n = notes.find((x) => x.id === id);
+    if (n) n.deleted_at = null;
+  },
+  async purgeNote(id: number) {
+    log("purge_note", id);
     const i = notes.findIndex((x) => x.id === id);
     if (i >= 0) notes.splice(i, 1);
     for (let j = taskRefs.length - 1; j >= 0; j--) {
@@ -325,6 +350,30 @@ const apiImpl = {
       if ((e.from_kind === "note" && e.from_id === id) || (e.to_kind === "note" && e.to_id === id))
         edges.splice(j, 1);
     }
+  },
+  async purgeExpiredNotes(days: number) {
+    log("purge_expired_notes", days);
+    if (days <= 0) return 0;
+    const cut = Date.now() - days * 86400000;
+    const gone = notes.filter(
+      (n) => n.deleted_at && new Date(String(n.deleted_at).replace(" ", "T")).getTime() < cut
+    );
+    for (const n of gone) {
+      const i = notes.indexOf(n);
+      if (i >= 0) notes.splice(i, 1);
+      for (let j = taskRefs.length - 1; j >= 0; j--) {
+        if (taskRefs[j].note_id === n.id) taskRefs.splice(j, 1);
+      }
+      for (let j = edges.length - 1; j >= 0; j--) {
+        const e = edges[j];
+        if (
+          (e.from_kind === "note" && e.from_id === n.id) ||
+          (e.to_kind === "note" && e.to_id === n.id)
+        )
+          edges.splice(j, 1);
+      }
+    }
+    return gone.length;
   },
 
   // ---- 白板资料（浏览器 mock：内容以 data URL 存在内存里） ----
@@ -634,6 +683,61 @@ const apiImpl = {
   async floatWebZoom() {
     /* 空操作 */
   },
+
+  // ---- 本地 AI 命令行（ACP）----
+  // 浏览器里没有真进程，这里给两条假数据，只为让「选后端 / 选模型」这两步能走通
+  // （也是使用指南配图用的）。桌面版是 Rust 扫固定路径 + PATH，再跑 --version 确认。
+  async aiDetectBackends() {
+    return [
+      {
+        id: "opencode",
+        name: "OpenCode",
+        exe: "C:/Users/you/AppData/Local/Programs/@opencodedesktop/resources/opencode-cli.exe",
+        args: ["acp"],
+        version: "opencode 0.4.2",
+      },
+      {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        exe: "C:/Users/you/AppData/Roaming/npm/dsh.cmd",
+        args: ["--profile", "acp"],
+        version: "dsh 1.3.0",
+      },
+    ];
+  },
+  async aiListModels() {
+    return [
+      { value: "deepseek/deepseek-chat", name: "DeepSeek Chat", free: false },
+      { value: "deepseek/deepseek-flash", name: "DeepSeek Flash", free: true },
+    ];
+  },
+  async aiStart() {
+    throw new Error("浏览器预览模式不能调用本地 AI 命令行，请用桌面版（工作看板.exe）");
+  },
+  async aiStatus() {
+    return { phase: "error", text: "", error: "浏览器预览模式不能调用本地 AI 命令行" };
+  },
+  async aiCancel() {
+    /* 空操作 */
+  },
+  async aiCollectOutputs() {
+    return [];
+  },
+  async aiPrepare(): Promise<{ dir: string; brief: string }> {
+    throw new Error("浏览器预览模式没有本地工作目录，请用桌面版");
+  },
+  async aiImportOutputs() {
+    return [];
+  },
+  async aiImportOutput(): Promise<null> {
+    return null;
+  },
+  async aiOpenDir() {
+    /* 空操作 */
+  },
+  async aiSaveReply(): Promise<string> {
+    return "";
+  },
 };
 
 // ---------------------------------------------------------------
@@ -649,9 +753,11 @@ const LS_KEY = "kanban-mock-state-v1";
 /** 不改变数据的方法，调用后不需要落盘 */
 const READ_ONLY = new Set([
   "bootstrap", "listProjects", "listColumns", "listTasks", "listTags", "listTrash",
-  "listNotes", "listEdges", "listTaskRefs", "listAssets", "getSettings", "diagLog", "diagDb",
+  "listNotes", "listDeletedNotes", "listEdges", "listTaskRefs", "listAssets", "getSettings", "diagLog", "diagDb",
   "readAssetDataUrl", "getDataDir", "openAsset", "revealAsset", "openDataDir",
-  "findAssetByHash", "listDocs", "dataOverview", "pickFolder", "openProjectDb",
+  "findAssetByHash", "listDocs", "dataOverview", "pickFolder", "openProjectDir",
+  "aiDetectBackends", "aiListModels", "aiCollectOutputs", "aiOpenDir", "aiStatus",
+  "openProjectDb",
 ]);
 
 function snapshot(withBlobs: boolean) {
@@ -751,9 +857,33 @@ loadState();
   }
 })();
 
-// 预置项目：山茶间 · 品牌视觉体系。
+// 老版演示项目整份清掉（任务 / 白板 / 连线 / 依据 / 文档 / 附件一起走）。
+// 不清的话新版预置项目会和它并排站着，谁都分不清哪个才是"那个测试项目"。
+(function purgeLegacyDemo() {
+  const ids = new Set(
+    projects.filter((p) => LEGACY_DEMO_NAMES.includes(p.name)).map((p) => p.id)
+  );
+  if (!ids.size) return;
+  const del = <X extends { project_id: number }>(arr: X[]) => {
+    for (let i = arr.length - 1; i >= 0; i--) if (ids.has(arr[i].project_id)) arr.splice(i, 1);
+  };
+  del(projects);
+  del(columns);
+  del(tasks);
+  del(notes);
+  del(edges);
+  del(taskRefs);
+  del(docs);
+  const assets = ((window as any).__mockAssets ||= []);
+  for (let i = assets.length - 1; i >= 0; i--) {
+    if (ids.has(assets[i].project_id)) assets.splice(i, 1);
+  }
+  saveState();
+})();
+
+// 预置项目：山茶间 · 品牌全案。
 // 空白看板说明不了任何问题，所以浏览器预览模式下自带一个跑完整流程的项目，
-// 用来检验「给 AI 的指令」能不能把关系说清楚。已经存在同名项目就不重复注入。
+// 用来检验层级、整理布局和「给 AI 的指令」。已经存在同名项目就不重复注入。
 (function injectDemoProject() {
   if (projects.some((x) => x.name === DEMO_PROJECT_NAME)) return;
   projects.push({ ...seedProject });

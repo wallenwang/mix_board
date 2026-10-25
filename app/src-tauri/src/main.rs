@@ -3,6 +3,7 @@
 mod commands;
 mod db;
 mod diag;
+mod agent;
 
 use db::Db;
 use tauri::{LogicalSize, Manager};
@@ -251,11 +252,19 @@ fn main() {
             commands::move_task, commands::delete_task, commands::restore_task,
             commands::purge_task,
             commands::list_trash, commands::empty_trash,
+            commands::ai_prepare, commands::ai_import_outputs, commands::ai_import_output,
+            commands::ai_open_dir,
+            agent::ai_detect_backends, agent::ai_list_models, agent::ai_start,
+            agent::ai_cancel,
+            agent::ai_collect_outputs, agent::ai_save_reply, agent::ai_status,
             commands::list_tags, commands::create_tag, commands::delete_tag,
             commands::get_settings, commands::set_setting_kv, commands::bootstrap,
             commands::set_task_pos,
             commands::list_notes, commands::create_note, commands::update_note,
             commands::delete_note,
+            // 白板卡片的回收站：软删除 / 列表 / 恢复 / 彻底删 / 到期清理
+            commands::list_deleted_notes, commands::restore_note, commands::purge_note,
+            commands::purge_expired_notes,
             commands::list_edges, commands::create_edge, commands::delete_edge,
             commands::update_edge,
             commands::list_task_refs, commands::set_task_ref, commands::delete_task_ref,

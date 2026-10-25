@@ -79,6 +79,8 @@ export interface ExportLine {
   width: number;
   /** 关系类型：决定虚线样式，跟屏幕上的 CSS 一一对应 */
   kind?: "decompose" | "precede" | "evidence" | "produce";
+  /** 显式虚线（弱参考 = 淡灰虚线）；不给就按 kind 的默认样式 */
+  dash?: number[];
 }
 
 export interface ExportScene {
@@ -671,7 +673,7 @@ export function renderScene(scene: ExportScene, scale = 2, pad = 60): HTMLCanvas
     ctx.strokeStyle = l.color;
     ctx.lineWidth = l.width;
     // 依据用点线，其余实线 —— 屏幕上的 .edge-line.k-* 是同一条规则
-    ctx.setLineDash(l.kind === "evidence" ? [1, 5] : []);
+    ctx.setLineDash(l.dash ?? (l.kind === "evidence" ? [1, 5] : []));
     ctx.stroke(new Path2D(l.d));
   }
   ctx.setLineDash([]);

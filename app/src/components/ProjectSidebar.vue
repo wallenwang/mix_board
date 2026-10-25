@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { useBoardStore } from "../store";
 import { api } from "../api";
-import { ElMessageBox } from "element-plus";
+import { ElMessageBox, ElMessage } from "element-plus";
 import { reportError } from "../diag";
 import AppIcon from "./AppIcon.vue";
 import DataStoreDialog from "./DataStoreDialog.vue";
@@ -32,8 +32,11 @@ async function addProject() {
     const id = await api.createProject(value.trim());
     await store.refreshProjects();
     await store.loadProject(id);
+    ElMessage.success(`已新建项目「${value.trim()}」`);
   } catch (e) {
     reportError("新建项目", e);
+    const msg = String((e as Error)?.message ?? e);
+    ElMessage.error(`新建项目失败：${msg.slice(0, 80)}`);
   }
 }
 

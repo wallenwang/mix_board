@@ -19,7 +19,6 @@ import {
   BOX_COLORS,
   inkOn,
   inkShadowOn,
-  clipToRect as clipToRectShared,
   edgeGeom,
   edgePath as edgePathShared,
 } from "../wb";
@@ -46,6 +45,8 @@ import {
 } from "../exportImage";
 import { reportError } from "../diag";
 import { openPrompt } from "../aiPrompt";
+import { AI_OUT_MIME, dropOutputOnBoard } from "../aiAgent";
+import { boardFocusRect } from "../uiBus";
 
 const store = useBoardStore();
 const canvasRef = ref<HTMLElement | null>(null);
@@ -252,6 +253,7 @@ function isChrome(t: HTMLElement | null) {
 function bgDown(e: MouseEvent) {
   // 点空白先收起浮层（点在浮层上时，浮层自己 stop 了 pointerdown，走不到这里）
   if (edgePick.value) edgePick.value = null;
+  if (boxPick.value) boxPick.value = null;
   if (refPick.value) refPick.value = null;
   // 中键：任何地方都能平移
   if (e.button === 1) {
@@ -397,11 +399,54 @@ function posOfKey(key: string) {
   return posOf(kind, id);
 }
 
-function sizeAt(kind: "task" | "note", id: number) {
-  if (kind === "task") return { w: TASK_W, h: TASK_H };
-  const n = noteById(id);
-  return n ? noteSize(n) : { w: 0, h: 0 };
+/**
+ * 任务卡的**真实**高度：卡片高度跟内容走（标题 / 说明 / 标签行数都不一样，实测 94~160px）。
+ * 端口圆点画在 50% 处，所以连线端点也必须按真实高度算 ——
+ * 写死 TASK_H(72) 的话，线会连到卡片"上半截的虚空中点"，跟圆点差十几像素。
+ */
+const heightTick = ref(0);
+function taskHeightOf(id: number): number {
+  void heightTick.value; // 读一下，DOM 量过之后能触发重算
+  const el = document.querySelector(
+    `[data-node-kind="task"][data-node-id="${id}"]`
+  ) as HTMLElement | null;
+  return el && el.offsetHeight > 20 ? el.offsetHeight : TASK_H;
 }
+
+function sizeAt(kind: "task" | "note", id: number) {
+  if (kind === "task") return { w: TASK_W, h: taskHeightOf(id) };
+  const n = noteById(id);
+  if (!n) return { w: 0, h: 0 };
+  const s = noteSize(n);
+  // 便签文字换行后实际会比存的高度高几像素，端口在 50% 处，以渲染高度为准
+  void heightTick.value;
+  const el = document.querySelector(
+    `[data-node-kind="note"][data-node-id="${id}"]`
+  ) as HTMLElement | null;
+  return { w: s.w, h: el && el.offsetHeight > 16 ? el.offsetHeight : s.h };
+}
+
+// 卡片高度会随内容变化：挂载后、任务内容变化后、窗口尺寸变化后都重新量一次，
+// 否则连线会停在"上一次的高度"上，跟端口圆点错开。
+function bumpTaskHeights() {
+  void nextTick(() => heightTick.value++);
+}
+onMounted(() => {
+  bumpTaskHeights();
+  window.addEventListener("resize", bumpTaskHeights);
+  // 字体加载 / 文本换行落定后卡片还会再高一截，补两次测量
+  setTimeout(bumpTaskHeights, 300);
+  setTimeout(bumpTaskHeights, 1200);
+  void (document as any).fonts?.ready?.then(() => bumpTaskHeights());
+});
+onBeforeUnmount(() => window.removeEventListener("resize", bumpTaskHeights));
+watch(
+  () =>
+    store.allTasks
+      .map((t) => `${t.id}:${t.title.length}:${t.description?.length ?? 0}`)
+      .join("|"),
+  () => bumpTaskHeights()
+);
 
 // clear state when switching projects
 watch(
@@ -499,6 +544,14 @@ async function applyPos(kind: string, id: number, p: { x: number; y: number }) {
  * 只顺着分解边走：移动任务不该把它的资料（依据）或前后环节（先后）一起拖走，
  * 那些是独立摆放的东西。
  */
+/** 右键拖动结束后的那一次 contextmenu 要吃掉（松手不该弹菜单） */
+let swallowCtxMenu = false;
+function consumeCtxMenu(): boolean {
+  if (!swallowCtxMenu) return false;
+  swallowCtxMenu = false;
+  return true;
+}
+
 function withDescendants(roots: string[]): string[] {
   const all = new Set(roots);
   const queue = [...roots];
@@ -560,58 +613,70 @@ function nodesInBox(box: BoardNote): string[] {
 }
 
 async function startDrag(e: PointerEvent, kind: "task" | "note", id: number) {
-  if (e.button !== 0) return;
+  // 左键 = 正常拖动（父节点带着下级一起走）；右键 = 只拖这一个，父子不联动。
+  // 右键不 preventDefault：没拖动的时候那一刻还得让菜单正常弹出来。
+  const rightDrag = e.button === 2;
+  if (!rightDrag && e.button !== 0) return;
   if ((e.target as HTMLElement).closest("textarea, input, button, .node-port, .node-resize"))
     return;
-  e.preventDefault();
-  e.stopPropagation();
-
-  if (tool.value === "link") {
-    void handleLinkClick(kind, id);
-    return;
+  if (!rightDrag) {
+    e.preventDefault();
+    e.stopPropagation();
   }
 
-  // Shift + 拖动便签/资料 = 复制一份再拖走。
-  // 复制体共享同一份数据（file_id 相同），只是白板上多一个位置 ——
-  // 这样同一个资料可以摆两处、分别放进不同强度的框里。
-  // 任务卡不参与复制（任务是唯一实体，复制会造成两个 T1）。
-  if (e.shiftKey && kind === "note" && !isSelected(kind, id)) {
-    const src = noteById(id);
-    if (src && store.currentProjectId != null) {
-      try {
-        const nid = await api.createNote({
-          project_id: src.project_id,
-          x: src.x + 24,
-          y: src.y + 24,
-          text: src.text,
-          color: src.color,
-          kind: src.kind,
-          w: src.w,
-          h: src.h,
-          file_id: src.file_id,
-          meta: src.meta,
-        });
-        await store.refreshBoard();
-        // 拖的是新副本，原节点留在原地
-        id = nid;
-        selectOnly("note", nid);
-        ElMessage.info("已复制一份（数据仍指向同一份资料）");
-      } catch (err) {
-        reportError("复制节点", err);
-      }
+  if (!rightDrag) {
+    if (tool.value === "link") {
+      void handleLinkClick(kind, id);
+      return;
     }
-  } else if (e.ctrlKey || e.metaKey) toggleSelect(kind, id);
-  else if (!isSelected(kind, id)) selectOnly(kind, id);
 
-  // 实际被拖的是「选中的节点」+「它们的所有后代」
-  const moveKeys = new Set(withDescendants(selectedKeys.value.slice()));
-  // 拖分组框 = 拖整个分区：框里的节点全都跟着走（框套框会一并带走）
-  for (const k of [...moveKeys]) {
-    const { kind: kk, id: ii } = parseKey(k);
-    if (kk !== "note") continue;
-    const n = noteById(ii);
-    if (!n || kindOf(n) !== "box") continue;
-    for (const mk of nodesInBox(n)) moveKeys.add(mk);
+    // Shift + 拖动便签/资料 = 复制一份再拖走。
+    // 复制体共享同一份数据（file_id 相同），只是白板上多一个位置 ——
+    // 这样同一个资料可以摆两处、分别放进不同强度的框里。
+    // 任务卡不参与复制（任务是唯一实体，复制会造成两个 T1）。
+    if (e.shiftKey && kind === "note" && !isSelected(kind, id)) {
+      const src = noteById(id);
+      if (src && store.currentProjectId != null) {
+        try {
+          const nid = await api.createNote({
+            project_id: src.project_id,
+            x: src.x + 24,
+            y: src.y + 24,
+            text: src.text,
+            color: src.color,
+            kind: src.kind,
+            w: src.w,
+            h: src.h,
+            file_id: src.file_id,
+            meta: src.meta,
+          });
+          await store.refreshBoard();
+          // 拖的是新副本，原节点留在原地
+          id = nid;
+          selectOnly("note", nid);
+          ElMessage.info("已复制一份（数据仍指向同一份资料）");
+        } catch (err) {
+          reportError("复制节点", err);
+        }
+      }
+    } else if (e.ctrlKey || e.metaKey) toggleSelect(kind, id);
+    else if (!isSelected(kind, id)) selectOnly(kind, id);
+  }
+
+  // 左键：拖「选中的节点」+「它们的所有后代」；右键：只拖光标下这一个
+  const moveKeys = rightDrag
+    ? new Set([keyOf(kind, id)])
+    : new Set(withDescendants(selectedKeys.value.slice()));
+  // 拖分组框 = 拖整个分区：框里的节点全都跟着走（框套框会一并带走）。
+  // 右键拖动不套这一层 —— 用户要的是"只拿这一个"，连带关系一律不生效。
+  if (!rightDrag) {
+    for (const k of [...moveKeys]) {
+      const { kind: kk, id: ii } = parseKey(k);
+      if (kk !== "note") continue;
+      const n = noteById(ii);
+      if (!n || kindOf(n) !== "box") continue;
+      for (const mk of nodesInBox(n)) moveKeys.add(mk);
+    }
   }
   const moving = [...moveKeys].map((k) => {
     const { kind: kk, id: ii } = parseKey(k);
@@ -634,6 +699,8 @@ async function startDrag(e: PointerEvent, kind: "task" | "note", id: number) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     if (!moved) return;
+    // 右键拖动结束：紧跟着的那次 contextmenu 吃掉，不然一松手就弹菜单
+    if (rightDrag) swallowCtxMenu = true;
     const changes: { m: (typeof moving)[number]; to: { x: number; y: number } }[] = [];
     for (const m of moving) {
       const to = drafts.value[m.key];
@@ -972,7 +1039,9 @@ async function addGantt() {
 async function removeNote(n: BoardNote) {
   try {
     await ElMessageBox.confirm(
-      n.kind === "file" ? `删除资料「${n.text}」？文件本体也会一起删掉。` : "删除这张卡片？",
+      n.kind === "file"
+        ? `删除资料「${n.text}」？会放进回收站，30 天内可以放回白板。`
+        : "删除这张卡片？会放进回收站，30 天内可以恢复。",
       "删除",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
     );
@@ -1226,6 +1295,102 @@ function metaField(n: BoardNote): Record<string, unknown> {
   }
 }
 
+/** 这框是不是 AI 产物组（meta.role = "output"） */
+function isOutputBox(n: BoardNote | undefined): boolean {
+  if (!n || n.kind !== "box") return false;
+  return metaField(n).role === "output";
+}
+
+/**
+ * 手动标记 / 取消「AI 产物组」。
+ *
+ * AI 打完组会自动标；但自己框出来的一块想标成产物，也得有个入口。
+ * 标记只写 meta.role，不新增 NodeKind —— 新增一种卡片要同步五个地方，
+ * 收益却完全一样。
+ */
+async function toggleOutputBox(n: BoardNote) {
+  try {
+    const was = isOutputBox(n);
+    const m = { ...(metaField(n) as Record<string, unknown>) };
+    if (was) delete m.role;
+    else m.role = "output";
+    const meta = JSON.stringify(m);
+    await api.updateNote(n.id, { meta });
+    // meta 不在响应式里，必须让 store 重建数组才会重绘
+    await store.refreshBoard();
+    ElMessage.success(
+      was ? "已取消产物标记" : "已标成 AI 产物组（框头会挂绿标，产物线不进 AI 参考）"
+    );
+  } catch (err) {
+    reportError("标记产物组", err);
+  }
+}
+
+/**
+ * 分组框也有「这一组有多硬」的切换，跟连线是同一排四个按钮：
+ * 强依据 / 参考 / 弱参考 / 产物。
+ *
+ * 落库位置：产物 = meta.role("output")；其余三档 = meta.cluster。
+ * 之所以不新增一种节点类型 —— 新增 NodeKind 要同步五处，收益完全一样。
+ */
+const boxPick = ref<{ id: number; x: number; y: number } | null>(null);
+const boxMenuEl = ref<HTMLElement | null>(null);
+const boxMenuFlip = ref(false);
+
+/** 这个框现在处于哪一档 */
+function boxStateOf(id: number | undefined): LineState {
+  const n = store.notes.find((x) => x.id === id);
+  if (!n) return "ref";
+  if (isOutputBox(n)) return "produce";
+  return strengthOf(n);
+}
+
+/** 点框头那个标签 → 在点击处浮出四档菜单（再点一次收起；贴边会自己翻向） */
+async function openBoxMenu(ev: MouseEvent, n: BoardNote) {
+  if (boxPick.value?.id === n.id) {
+    boxPick.value = null;
+    return;
+  }
+  const r = canvasRef.value?.getBoundingClientRect();
+  boxPick.value = { id: n.id, x: ev.clientX - (r?.left ?? 0), y: ev.clientY - (r?.top ?? 0) };
+  await nextTick();
+  const el = boxMenuEl.value;
+  const box = canvasRef.value;
+  const p = boxPick.value;
+  if (!el || !box || !p) return;
+  const w = el.offsetWidth;
+  const maxX = box.clientWidth - w / 2 - 10;
+  const minX = w / 2 + 10;
+  const x = Math.min(maxX, Math.max(minX, p.x));
+  if (x !== p.x) boxPick.value = { ...p, x };
+  boxMenuFlip.value = p.y - el.offsetHeight - 16 < 6;
+}
+
+async function setBoxState(s: LineState) {
+  const n = store.notes.find((x) => x.id === boxPick.value?.id);
+  if (!n) return;
+  try {
+    const m: Record<string, unknown> = { ...metaField(n) };
+    let color = n.color;
+    if (s === "produce") {
+      m.role = "output";
+    } else {
+      delete m.role;
+      m.cluster = s;
+      // 框的边框/标题色跟着档位走，扫一眼就知道哪一块是硬材料（跟以前点标签换档一致）
+      color = CLUSTER_MAP.get(s)?.color ?? n.color;
+    }
+    await api.updateNote(n.id, { meta: JSON.stringify(m), color });
+    boxPick.value = null;
+    // meta 不在响应式里，必须让 store 重建数组才会重绘
+    await store.refreshBoard();
+    const label = LINE_STATES.find((x) => x.v === s)?.label ?? s;
+    ElMessage.success(`分组已改成「${label}」`);
+  } catch (err) {
+    reportError("改分组框性质", err);
+  }
+}
+
 /** 框的强度；没标过（或根本不是框）一律当"参考" */
 function strengthOf(n: BoardNote | undefined): ClusterStrength {
   if (!n || n.kind !== "box") return "ref";
@@ -1470,6 +1635,7 @@ function closeMenus() {
 
 /** 右键图片卡片：只有图片才有"发送到文档"的意义 */
 function onNoteMenu(e: MouseEvent, n: BoardNote) {
+  if (consumeCtxMenu()) return; // 刚右键拖动完，这一下不该弹菜单
   if (kindOf(n) !== "file") return;
   const f = fileOf(n);
   if (!f || !isImageFile(f)) return;
@@ -1561,15 +1727,23 @@ async function createFromTypeMenu(kind: MenuKind) {
   const m = typeMenu.value;
   typeMenu.value = null;
   if (!m || store.currentProjectId == null) return;
+  // 5 层限制只管「任务」：从第 5 层任务再拖出一个任务不行；
+  // 便签 / 图片 / 文字 / 导图 / 文档这些依据类节点想挂多少挂多少。
+  // 5 层限制只管「往下加」：从输入端（右）拖出的是下级，加之前先看层数够不够；
+  // 从输出端（左）拖出的是上级，不在这里拦。
+  if (kind === "task" && m.from.role === "in" && !canAddChild(keyOf(m.from.kind, m.from.id)))
+    return;
   // 任务不是白板节点，走任务那条路：建成真任务，再按端口方向连上
   if (kind === "task") {
     const from = m.from;
     const id = await addTaskAt(m.wx - TASK_W / 2, m.wy - TASK_H / 2);
     if (id == null) return;
+    // 输出端（左）长出来的任务：接住本节点的产出 → 它是本节点的上级
+    // 输入端（右）长出来的任务：它的产物流进本节点 → 它是本节点的下级
     if (from.role === "out") {
-      await connect({ kind: from.kind, id: from.id }, { kind: "task", id });
-    } else {
       await connect({ kind: "task", id }, { kind: from.kind, id: from.id });
+    } else {
+      await connect({ kind: from.kind, id: from.id }, { kind: "task", id });
     }
     return;
   }
@@ -1599,8 +1773,8 @@ async function createFromTypeMenu(kind: MenuKind) {
     });
   }
   if (nid == null) return;
-  if (m.from.role === "out") await connect(m.from, { kind: "note", id: nid });
-  else await connect({ kind: "note", id: nid }, m.from);
+  if (m.from.role === "out") await connect({ kind: "note", id: nid }, m.from);
+  else await connect(m.from, { kind: "note", id: nid });
   await store.refreshBoard();
 }
 
@@ -1616,8 +1790,8 @@ async function onPortFilePicked(e: Event) {
   const ids = await importFiles(files, { x: ctx.wx, y: ctx.wy });
   const nid = ids[0];
   if (nid == null) return;
-  if (ctx.from.role === "out") await connect(ctx.from, { kind: "note", id: nid });
-  else await connect({ kind: "note", id: nid }, ctx.from);
+  if (ctx.from.role === "out") await connect({ kind: "note", id: nid }, ctx.from);
+  else await connect(ctx.from, { kind: "note", id: nid });
   await store.refreshBoard();
 }
 
@@ -1665,7 +1839,11 @@ const linkFrom = ref<{ kind: "task" | "note"; id: number } | null>(null);
 function reachable(aKind: string, aId: number, bKind: string, bId: number): boolean {
   const kids = new Map<string, { kind: string; id: number }[]>();
   for (const e of store.edges) {
-    // from 是子、to 是父：子的邻居是父
+    // ⚠️ 只认**结构边**：分解（下级→上级）和依据（支撑方→被支撑方）。
+    //    以前这里把所有边都当父链走，一条「产物」线也会被当成上下级，
+    //    于是两个毫无层级的卡片被判成"会绕圈"、死活连不上。
+    if (e.kind !== "decompose" && e.kind !== "evidence") continue;
+    // from 是下级、to 是上级：下级的邻居是上级
     const k = `${e.from_kind}:${e.from_id}`;
     const arr = kids.get(k);
     const v = { kind: e.to_kind as string, id: e.to_id };
@@ -1685,6 +1863,34 @@ function reachable(aKind: string, aId: number, bKind: string, bId: number): bool
     }
   }
   return false;
+}
+
+/**
+ * 连线合法性检查 —— 返回 null 表示能连，返回字符串就是拒绝理由。
+ *
+ * 用户定的硬规则（2026-10-25，原话）：
+ *   1. 依据只能**从下级指向上级**，不管差多少级（孙子的产出可以给爷爷当依据）。
+ *   2. **上级永远不能成为自己直系后代的依据** —— 那等于把父子关系绕成一个圈，
+ *      编号、层级遍历、AI 组装上下文全都会死循环。
+ *   3. **旁系可以**：T1.1 给 T2.1.1 当依据没问题，它们不在同一条直系链上。
+ *
+ * 判定只要一句：顺着结构边从「被支撑方」往上走，如果能走回「支撑方」，
+ * 说明这两个节点本来就在同一条链上，这条线一加就是一个环。
+ *
+ * a = 下级 / 支撑方（线的起点），b = 上级 / 被支撑方（箭头指向它）。
+ */
+function linkRuleError(
+  a: { kind: string; id: number },
+  b: { kind: string; id: number },
+  kind: EdgeKind
+): string | null {
+  // 「产物」是交付关系、不参与层级，「先后」是时间顺序，都不受这条偏序约束
+  if (kind !== "decompose" && kind !== "evidence") return null;
+  if (!reachable(b.kind, b.id, a.kind, a.id)) return null;
+  if (kind === "evidence") {
+    return "上级不能当自己下级的依据：依据只能从下级指向上级，反着连会绕成死循环";
+  }
+  return "这两个卡片已经在同一条上下级链上，再连会绕成圈";
 }
 
 async function connect(
@@ -1715,34 +1921,39 @@ async function connect(
       e.to_kind === from.kind &&
       e.to_id === from.id
   );
-  // 资料 → 任务：这是"这个任务用这份材料"，也就是依据关系。
+  // 一端是资料、一端是任务 → 这是"这个任务用这份材料"，即依据关系。
   // 其余情况按默认的分解走，用户点连线菜单可以改。
   //
-  // ⚠️ 分解边的方向是**子 → 父**：from 是子级、to 是上级。
-  // 箭头指向被支撑的一方，跟依据（资料→任务）、先后（前置→后续）一致。
-  // 用户的操作方向仍是「先拖上级、再拖下级」，建边时反过来存。
-  const autoKind: EdgeKind =
-    from.kind === "note" && toKind === "task" ? "evidence" : "decompose";
-  // 依据边：from 是资料、to 是任务，方向不用改。
-  // 分解边：from 是上级、to 是下级，但库里存的是「子 → 父」，要对调。
-  const flip = autoKind === "decompose";
+  // ⚠️ 端口从哪一头起线都可能（左端输出 / 右端输入），所以两种关系的
+  //    from / to 都必须在这里摆正，不能假设调用方已经按语义排好：
+  //    · 依据 = 资料 → 任务（箭头指向任务）
+  //    · 分解 = 子 → 父（箭头指向被支撑的一方）
+  const noteTask =
+    (from.kind === "note" && toKind === "task") || (from.kind === "task" && toKind === "note");
+  const autoKind: EdgeKind = noteTask ? "evidence" : "decompose";
+  const flip = autoKind === "decompose" ? true : from.kind !== "note";
   const a = flip ? { kind: toKind, id: to.id } : { kind: from.kind, id: from.id };
   const b = flip ? { kind: from.kind, id: from.id } : { kind: toKind, id: to.id };
+  // 依据边要写 task_refs：task_id / note_id 从摆正后的 a、b 里取，别再猜 from/to
+  const refTaskId = a.kind === "task" ? a.id : b.id;
+  const refNoteId = a.kind === "note" ? a.id : b.id;
+  // 层级守卫：依据必须「下级 → 上级」、分解必须「子 → 父」，两种都不许绕成环。
+  // ⚠️ 必须放在 rev 分支**前面**：反转方向同样可能绕成圈，
+  //    不能因为它"只是把旧线掉个头"就放行。
+  const badLink = linkRuleError(a, b, autoKind);
+  if (badLink) {
+    ElMessage.warning(badLink);
+    return;
+  }
   try {
     if (rev) {
       await api.deleteEdge(rev.id);
       await api.createEdge(store.currentProjectId, a.kind, a.id, b.kind, b.id, autoKind);
       if (autoKind === "evidence") {
-        await api.setTaskRef(store.currentProjectId, to.id, from.id, 1);
+        await api.setTaskRef(store.currentProjectId, refTaskId, refNoteId, 1);
       }
       await store.refreshBoard();
       ElMessage.success("已反转上下级方向（箭头指向被支撑的一方）");
-      return;
-    }
-    // 会绕成圈：建「子 → 父」之前先看父的祖先链里有没有子。
-    // reachable 走的是向上的父级链，所以是 reachable(父, 子)。
-    if (reachable(from.kind, from.id, toKind, to.id)) {
-      ElMessage.warning("这两个卡片已经在同一条上下级链上了，再连会绕成圈");
       return;
     }
     await api.createEdge(store.currentProjectId, a.kind, a.id, b.kind, b.id, autoKind);
@@ -1750,12 +1961,12 @@ async function connect(
       // 默认等级跟着资料所在分组走：强依据→必须遵守、参考→可以参考、弱参考→仅作背景。
       // 没放进任何分组就按「必须遵守」—— 无框默认强，宁可过严再调低，
       // 反过来漏掉硬约束的代价更大。任务卡上仍可随时改档。
-      const src = noteById(from.id);
+      const src = noteById(refNoteId);
       const st = src ? clusterOfNote(src) : null;
       await api.setTaskRef(
         store.currentProjectId,
-        to.id,
-        from.id,
+        refTaskId,
+        refNoteId,
         st ? CLUSTER_LEVEL[st] : 0
       );
     }
@@ -1788,21 +1999,31 @@ function onToolbarMore(cmd: string) {
   else if (cmd === "pdf") exportBoardImage("pdf");
 }
 
-/** 端口在画布上的世界坐标：in = 左边中点，out = 右边中点 */
+/**
+ * 端口在画布上的世界坐标。
+ *
+ * ⚠️⚠️ 全板统一：**左侧 = 输出（out），右侧 = 输入（in）**，所有节点都一样。
+ *
+ * 这是用户定的心智模型：每个节点都是「左边把东西吐出去、右边把东西收进来」，
+ * 所以子级的产出从**子级左端口**出去，流进**父级右端口**，箭头永远指向父级。
+ * 不要按「靠近对方的那一侧」去动态选端口 —— 那样父子上下堆叠时两端会都在右
+ * 端口，看起来就成了「输出连输出」，用户一眼就看出不对（已经因此返工过）。
+ */
 function portAnchor(kind: "task" | "note", id: number, role: "in" | "out") {
   const p = posOf(kind, id);
   const s = sizeAt(kind, id);
   return {
-    x: role === "out" ? p.x + s.w : p.x,
+    x: role === "out" ? p.x : p.x + s.w,
     y: p.y + s.h / 2,
   };
 }
 
 /**
  * 从节点两端的圆形端口拉线（像节点式编辑器那样）：
- * - 右边「输出」：本节点是上级 —— 松手落在谁身上，谁就成为它的下级；
- * - 左边「输入」：本节点是下级 —— 松手落在谁身上，谁就成为它的上级。
- * 两种拖法都会自动判对方向，不用再记「先点谁、后点谁」。
+ * - 左边「输出」：本节点是**子级**，产出流出去 —— 松手落在谁身上，谁就是它的上级；
+ * - 右边「输入」：本节点是**父级**，收对方的产出 —— 松手落在谁身上，谁就是它的下级。
+ * 两端都能起线，建边时自动把方向摆正（库里永远存「子 → 父」），
+ * 所以从父往子拖、还是从子往父拖，画出来都是同一条「输出 → 输入」的线。
  */
 function startLinkPort(e: PointerEvent, kind: "task" | "note", id: number, role: "in" | "out") {
   e.preventDefault();
@@ -1828,8 +2049,10 @@ function startLinkPort(e: PointerEvent, kind: "task" | "note", id: number, role:
     const toKind = el.getAttribute("data-node-kind") as "task" | "note";
     const toId = Number(el.getAttribute("data-node-id"));
     if (toKind === kind && toId === id) return;
-    if (role === "out") await connect({ kind, id }, { kind: toKind, id: toId });
-    else await connect({ kind: toKind, id: toId }, { kind, id });
+    // 输出端（左）出去，意味着「这张卡的产出交给对方」→ 对方是它的上级；
+    // 输入端（右）出去，意味着「对方把产出送进来」→ 对方是它的下级。
+    if (role === "out") await connect({ kind: toKind, id: toId }, { kind, id });
+    else await connect({ kind, id }, { kind: toKind, id: toId });
   }
   upd(e);
   window.addEventListener("pointermove", upd);
@@ -1842,32 +2065,81 @@ function centerOf(kind: "task" | "note", id: number) {
   return { x: p.x + s.w / 2, y: p.y + s.h / 2 };
 }
 
-/** 从矩形中心朝目标方向，把点推到矩形边框上 —— 连线贴边走，不会画进卡片里面 */
-function clipToRect(
-  c: { x: number; y: number },
-  toward: { x: number; y: number },
-  s: { w: number; h: number }
-) {
-  const dx = toward.x - c.x;
-  const dy = toward.y - c.y;
-  if (!dx && !dy) return { x: c.x, y: c.y };
-  const hw = Math.max(1, s.w / 2);
-  const hh = Math.max(1, s.h / 2);
-  const k = Math.min(hw / (Math.abs(dx) || 1e-6), hh / (Math.abs(dy) || 1e-6));
-  return { x: c.x + dx * k, y: c.y + dy * k };
+/** 连线等级：依据查 task_refs 的档位，分解查边上的 strength。
+ *  产物没有档位，返回 -1（它按类型色画）。
+ *
+ *  ⚠️ 默认档位是「参考（1）」，不是强依据：
+ *     以前没设过档位的线一律按 0 画成红色，整个白板一片红，
+ *     用户根本分不出哪条才是真的"不得违反"。现在红色只留给显式设过强依据的线。
+ */
+function levelOfEdge(e: BoardEdge): number {
+  if (e.kind === "evidence") {
+    // task_refs(task_id, note_id) 只认「资料→任务」这个方向。
+    // 反过来的边查不到 ref，若默认按 0 处理就会被画成红色强依据 —— 明明是弱参考却撒谎，
+    // 所以方向不对就返回 -1，交给类型色。
+    if (e.to_kind !== "task") return -1;
+    // 任务 → 任务的**旁系依据**不写 task_refs（refs 的 note_id 只能是资料），
+    // 档位存在边自己的 strength 上。以前这里一律返回 -1，改完档位就看不见颜色。
+    if (e.from_kind === "task") return e.strength ?? 1;
+    const r = store.refsOfTask(e.to_id).find((x) => x.note_id === e.from_id);
+    return r ? r.level : 1;
+  }
+  if (e.kind === "decompose") return e.strength ?? 1;
+  // 「先后」线（老数据）也归到四档里画：默认「参考」黄。
+  // 以前它单独一种橙色，用户看到的是第五种颜色 —— 他只认红/黄/灰/绿。
+  if (e.kind === "precede") return e.strength ?? 1;
+  return -1;
 }
 
-/** 每条可见连线的四个端点（都吸附在节点边框上） */
+/** 每条可见连线的四个端点。
+ *  ⚠️ 端点一律落在卡片**左右那两个圆点（端口）**上，不再切矩形边框：
+ *  端口是用户拖线时唯一能抓的东西，线从别处冒出来会让人怀疑"这根线从哪起的"。 */
 const visibleEdgeGeom = computed(() =>
   visibleEdges.value.map((e) => {
     const fk = e.from_kind as "task" | "note";
     const tk = e.to_kind as "task" | "note";
     const a = centerOf(fk, e.from_id);
     const b = centerOf(tk, e.to_id);
-    const p1 = clipToRect(a, b, sizeAt(fk, e.from_id));
-    const p2 = clipToRect(b, a, sizeAt(tk, e.to_id));
-    const g = edgeGeom(a, b, p1, p2, edgeStyle.value);
-    return { e, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, d: g.d, angle: g.angle };
+    /**
+     * 端点**位置固定**，不看两张卡谁左谁右：
+     *   from（子级）的**左**端口出 → to（父级）的**右**端口进。
+     *
+     * 以前是按「靠近对方的那一侧」动态挑端口，于是父子上下堆叠时两端都落在
+     * 右端口上，视觉上成了「输出连输出」——用户一眼看出不对。
+     * 现在端口位置与布局无关，语义恒定，父子怎么摆都是一条「输出 → 输入」的线。
+     */
+    const p1 = portAnchor(fk, e.from_id, "out");
+    const p2 = portAnchor(tk, e.to_id, "in");
+    // ⚠️ 端点外退一点，但**不能太多**：12px 时箭头离卡片太远，看着线根本没连上；
+    //    6px 时箭头又和卡片圆角、端口圆点叠在一起，尖端像是插进卡里。
+    //    9px ≈ 端口圆点的外沿 + 卡片投影，箭头正好完整露在卡片外面。
+    const ARROW_GAP = 9;
+    const out = p2.x < b.x ? -ARROW_GAP : ARROW_GAP;
+    const p2o = { x: p2.x + out, y: p2.y };
+    // 起点同样退一点点：不退的话线头钻进卡片背景里，看着像被节点"吃掉"一截
+    const START_GAP = 3;
+    const outS = p1.x < a.x ? -START_GAP : START_GAP;
+    const p1o = { x: p1.x + outS, y: p1.y };
+    // 同一个列间隙里往往并排好几条线，按 id 给每条一个固定的小横向偏移，
+    // 让它们各走各的（偏移量只跟 id 有关，所以重排、刷新都不会跳）
+    const bias = ((e.id * 37) % 7) * 3 - 9;
+    /**
+     * ⚠️ 走线**只看这两张卡自己的位置**，不再扫全板的卡片去找空档。
+     *
+     * 以前为了「线别压卡」，会去全板搜索最近的空列，找不到就改走正交折线。
+     * 代价是：拖任何一张不相干的卡片，只要它落进这条线的搜索范围，这条线
+     * 就整条换个位置 —— 用户看到的就是「拖 T5.1，PDF 到 T2.2.1 的线自己跑了」。
+     * 两条线之间本来没有关系，就不该互相影响，所以整段避障砍掉。
+     *
+     * 换来的：每条线的形状**只由它自己的两个端点决定**，拖 A 只动 A 的线。
+     * 图省事也别再加回来：任何"全局搜索"都会让线在拖动时乱跳。
+     */
+    const g = edgeGeom(a, b, p1o, p2o, edgeStyle.value, {
+      bias,
+      s1: sizeAt(fk, e.from_id),
+      s2: sizeAt(tk, e.to_id),
+    });
+    return { e, lv: levelOfEdge(e), x1: p1o.x, y1: p1o.y, x2: p2o.x, y2: p2o.y, d: g.d, angle: g.angle };
   })
 );
 
@@ -1962,41 +2234,168 @@ function openEdgeMenu(e: BoardEdge, ev: MouseEvent) {
  * - 依据（资料→任务）：task_refs.level（还带关注重点）
  * - 分解（子→父）：board_edges.strength
  */
-const LEVEL_META = [
-  { v: 0, label: "强依据", hint: "不得违反；冲突时以它为准" },
-  { v: 1, label: "参考", hint: "可用于补充，不构成强制要求" },
-  { v: 2, label: "弱参考", hint: "仅供理解语境，不作论据" },
+/**
+ * 一条线的「状态」只有四种：**强依据（红）/ 参考（黄）/ 弱参考（灰）/ 产物（绿）**。
+ *
+ * ⚠️ 界面上刻意不再出现「分解 / 先后 / 依据」这三个词 —— 它们是内部结构推断出来的，
+ *    不是用户要做的选择题（用户原话：就一排，强依据、参考、弱参考、产物）。
+ *
+ * 但 kind 字段必须留着：任务层级（store.ts 的父子树）、任务编号（numbering.ts）、
+ * AI 参考材料（aiPrompt.ts）全靠它。所以四种状态的落库方式：
+ *   任务→任务 的参考线 → kind=decompose，档位存 board_edges.strength
+ *   资料→任务 的参考线 → kind=evidence，档位存 task_refs.level
+ *   产物线            → kind=produce，不进 task_refs，AI 组装指令时不当材料
+ */
+type LineState = "strong" | "ref" | "weak" | "produce";
+
+/** 一排四档，按钮上的颜色就是线的颜色 */
+const LINE_STATES: { v: LineState; label: string; color: string; hint: string }[] = [
+  {
+    v: "strong",
+    label: "强依据",
+    color: "#d84338",
+    hint: "不得违反，冲突时以它为准（进 AI 参考）",
+  },
+  { v: "ref", label: "参考", color: "#d99b16", hint: "可用来补充，不构成强制要求（进 AI 参考）" },
+  { v: "weak", label: "弱参考", color: "#a8b1bd", hint: "仅供理解语境，不作论据（进 AI 参考）" },
+  {
+    v: "produce",
+    label: "产物",
+    color: "#1f8f5f",
+    hint: "只表示东西从这儿出来，不算依据，AI 组装指令时不当材料",
+  },
 ];
 
-/** 读当前等级：依据查 task_refs，分解查 strength */
-function edgeLevel(): number {
-  const cur = edgePick.value;
-  if (!cur) return 1;
-  const e = store.edges.find((x) => x.id === cur.id);
-  if (!e) return 1;
-  if (e.kind === "evidence") {
-    const r = store.refsOfTask(e.to_id).find((x) => x.note_id === e.from_id);
-    return r ? r.level : 1;
-  }
-  return e.strength ?? 0;
+/** 这条线现在是哪一档 */
+function lineStateOf(e: BoardEdge | undefined): LineState {
+  if (!e) return "ref";
+  if (e.kind === "produce") return "produce";
+  const lv = levelOfEdge(e);
+  if (lv === 0) return "strong";
+  if (lv === 2) return "weak";
+  return "ref";
 }
 
-async function setEdgeLevel(level: number) {
+/** 菜单里当前高亮哪一个 */
+function lineStateCurrent(): LineState {
+  return lineStateOf(store.edges.find((x) => x.id === edgePick.value?.id));
+}
+
+/**
+ * 改关系类型。
+ *
+ * 「依据」是唯一会写进 task_refs 的关系 —— AI 的参考材料只从 task_refs 读。
+ * 所以从依据改成别的类型时必须把那条 ref 摘掉，否则线已经变成「产物」了，
+ * 指令里还把它当参考材料，语义自相矛盾。
+ */
+/**
+ * 产物线 ↔ 产物组的联动。
+ *
+ * 用户的直觉是「把这块标成产物」，而不是「这条线是什么类型」。
+ * 所以点「产物」时顺手把连着的那一头分组框标成产物组（框头挂绿标），
+ * 反向改回别的类型时，如果这个框再没有别的产物线，就把标摘掉
+ * （否则框上写着"产物"、却没有一条产物线，语义自相矛盾）。
+ */
+async function syncOutputBoxOf(edgeId: number, kind: EdgeKind) {
+  const e = store.edges.find((x) => x.id === edgeId);
+  if (!e) return;
+  const ends: { k: string; id: number }[] = [
+    { k: e.from_kind, id: e.from_id },
+    { k: e.to_kind, id: e.to_id },
+  ];
+  for (const end of ends) {
+    if (end.k !== "note") continue;
+    const n = noteById(end.id);
+    if (!n || n.kind !== "box") continue;
+    const m: Record<string, unknown> = { ...metaField(n) };
+    if (kind === "produce") {
+      if (m.role === "output") continue;
+      m.role = "output";
+      await api.updateNote(n.id, { meta: JSON.stringify(m) });
+    } else if (m.role === "output") {
+      // ⚠️ store 里当前这条边还是旧 kind，要按 id 排除它再判断
+      const still = store.edges.some(
+        (x) =>
+          x.id !== edgeId &&
+          x.kind === "produce" &&
+          ((x.from_kind === "note" && x.from_id === n.id) ||
+            (x.to_kind === "note" && x.to_id === n.id))
+      );
+      if (still) continue;
+      delete m.role;
+      await api.updateNote(n.id, { meta: JSON.stringify(m) });
+    }
+  }
+}
+
+/**
+ * 切换这条线的状态（四种）。
+ *
+ * 从「产物」切回参考：kind 必须落回**结构类型**（否则任务层级、编号、AI 参考全断），
+ * 并顺手把框头的产物绿标摘掉。
+ * 切到「产物」：把这条线从 task_refs 里摘掉 —— AI 组装指令时就不会再当材料。
+ */
+async function setLineState(s: LineState) {
   const cur = edgePick.value;
   if (!cur) return;
   const e = store.edges.find((x) => x.id === cur.id);
   if (!e) return;
+  const pid = store.currentProjectId;
+  if (pid == null) return;
+  if (lineStateOf(e) === s) {
+    edgePick.value = null;
+    return;
+  }
+  // 只有「资料 → 任务」这条线能挂 task_refs（AI 的参考材料只从这儿读）
+  const noteToTask = e.from_kind === "note" && e.to_kind === "task";
   try {
-    if (e.kind === "evidence") {
-      // 依据：等级记在关系上（task_refs），同一份资料对不同任务可以不同档
-      await api.setTaskRef(store.currentProjectId!, e.to_id, e.from_id, level);
+    if (s === "produce") {
+      if (e.kind !== "produce") await api.updateEdge(e.id, { kind: "produce" });
+      if (noteToTask) await api.deleteTaskRef(e.to_id, e.from_id);
+      await syncOutputBoxOf(e.id, "produce");
     } else {
-      // 分解：子任务对父任务的重要程度记在边上
-      await api.updateEdge(e.id, { strength: level });
+      const lvl = s === "strong" ? 0 : s === "weak" ? 2 : 1;
+      /**
+       * ⚠️「任务 → 任务」如果**已经是依据线**，改档位时必须保持 evidence。
+       *
+       * 这种线是**旁系依据**（T1.1 支撑 T2.1.1，两者不在同一条直系链上），
+       * 一旦被降级成 decompose，白板上就凭空多出一个父子关系 —— 层级、编号、
+       * 交给 AI 的上下文全跟着乱。用户看到的就是"上级突然成了下级的依据"。
+       */
+      const keepEvidence = e.from_kind === "task" && e.kind === "evidence";
+      const structural: EdgeKind = noteToTask || keepEvidence ? "evidence" : "decompose";
+      // 从「产物」改回结构关系时，这条线的方向可能本来就是反的
+      //（产物不参与层级，所以当初连的时候没拦），落回依据/分解前必须过一遍层级守卫。
+      if (e.kind !== structural) {
+        const badPick = linkRuleError(
+          { kind: e.from_kind, id: e.from_id },
+          { kind: e.to_kind, id: e.to_id },
+          structural
+        );
+        if (badPick) {
+          ElMessage.warning(badPick);
+          return;
+        }
+      }
+      if (e.kind === "produce") await syncOutputBoxOf(e.id, structural);
+      if (structural === "evidence") {
+        if (e.kind !== structural) await api.updateEdge(e.id, { kind: structural });
+        if (noteToTask) {
+          await api.setTaskRef(pid, e.to_id, e.from_id, lvl);
+        } else {
+          // 任务之间的依据**不进 task_refs**：refs 的 note_id 只能指向资料，
+          // 塞个任务 id 进去，AI 组装参考材料时会去找一个不存在的文件。
+          await api.updateEdge(e.id, { strength: lvl });
+        }
+      } else {
+        await api.updateEdge(e.id, { kind: structural, strength: lvl });
+      }
     }
     await store.refreshBoard();
+    const label = LINE_STATES.find((x) => x.v === s)?.label ?? s;
+    ElMessage.success(s === "produce" ? "已改成「产物」：不进 AI 参考" : `已改成「${label}」`);
   } catch (err) {
-    reportError("改依据等级", err);
+    reportError("改关系类型", err);
   }
 }
 
@@ -2137,12 +2536,44 @@ function openAiPrompt(t: Task) {
 // ---- 树：任务 / 导图共用一套父子关系（就是白板连线） ----
 function parentKeyOf(key: string): string | null {
   const { kind, id } = parseKey(key);
-  const e = store.edges.find((x) => x.to_kind === kind && x.to_id === id);
+  // ⚠️ 分解边方向是「子 → 父」：所以 id 是 from 时才找得到它的上级（to）。
+  // 早先按 to_id === id 查，取到的是它的**子级**，Tab/Enter 会挂错地方。
+  // 也别混进先后 / 依据 / 产出：「下一道工序」不是上级。
+  const e = store.edges.find(
+    (x) => x.kind === "decompose" && x.from_kind === kind && x.from_id === id
+  );
   if (!e) return null;
   const exists =
-    e.from_kind === "task" ? taskById(e.from_id) != null : noteById(e.from_id) != null;
+    e.to_kind === "task" ? taskById(e.to_id) != null : noteById(e.to_id) != null;
   if (!exists) return null;
-  return keyOf(e.from_kind as "task" | "note", e.from_id);
+  return keyOf(e.to_kind as "task" | "note", e.to_id);
+}
+
+/** 最多 5 层：T1（第 1 层）→ T1.1 → T1.1.1 → T1.1.1.1 → T1.1.1.1.1 */
+const MAX_LEVELS = 5;
+
+/** 某个节点现在是第几层（根 = 1）。顺着分解边往上数，遇环也不会打转 */
+function levelOfKey(key: string): number {
+  let level = 1;
+  let cur: string | null = key;
+  const seen = new Set<string>([key]);
+  while (level < 40) {
+    const p = cur ? parentKeyOf(cur) : null;
+    if (!p || seen.has(p)) break;
+    seen.add(p);
+    level++;
+    cur = p;
+  }
+  return level;
+}
+
+/** 加下级之前先问一句：已经到第 5 层就拦住，别让树无限长 */
+function canAddChild(key: string): boolean {
+  if (levelOfKey(key) < MAX_LEVELS) return true;
+  ElMessage.warning(
+    `任务最多 ${MAX_LEVELS} 层，这一条已经到顶了。想更细就拆成同级几项（便签、资料这些不受限制）。`
+  );
+  return false;
 }
 
 /** Tab：加下一级。任务是加子任务，便签/导图是加分支 */
@@ -2170,6 +2601,7 @@ async function addSiblingOfKey(key: string) {
 async function addChildTask(parentId: number) {
   const p = taskById(parentId);
   if (!p || store.currentProjectId == null) return;
+  if (!canAddChild(keyOf("task", parentId))) return; // 最多 5 层
   try {
     const nid = await api.createTask({
       project_id: p.project_id,
@@ -2240,6 +2672,7 @@ async function addSiblingTask(id: number) {
 async function addChildNote(parentId: number) {
   const p = noteById(parentId);
   if (!p) return;
+  // 便签 / 导图 / 资料 不受 5 层限制：第 5 层任务下面照样可以挂一堆依据卡片
   const kids = store.edges.filter(
     (e) => e.from_kind === "note" && e.to_id === parentId && e.to_kind === "note"
   ).length;
@@ -2264,8 +2697,14 @@ async function ensureMindRoot() {
   return id != null ? noteById(id) ?? null : null;
 }
 
-// ---- 整理：任务树 + 导图树一起排（资料/便签保持用户摆的位置） ----
+// ---- 整理：任务按层级分列，资料统一排到最右一列 ----
 const mindCount = computed(() => store.notes.filter((n) => n.kind === "mind").length);
+
+/** 列间距：比原来宽一点，一眼能看出「这是下一层」而不是同一列挤着 */
+const LAYOUT_GAP_X = 420;
+const LAYOUT_GAP_Y = 46;
+/** 资料列内部的行距 */
+const MAT_GAP = 16;
 
 async function layoutMind(silent = false) {
   const keys: string[] = [];
@@ -2288,8 +2727,8 @@ async function layoutMind(silent = false) {
     keys.push(k);
     inSet.add(k);
   }
-  if (!keys.length) {
-    ElMessage.warning("白板上还没有任务或导图节点");
+  if (!keys.length && !store.notes.length) {
+    ElMessage.warning("白板上还没有任务或节点");
     return;
   }
   // ⚠️ 只有「分解」边定义树（from 是子、to 是父）。
@@ -2300,7 +2739,6 @@ async function layoutMind(silent = false) {
     .map((e) => ({ from: keyOf(e.from_kind, e.from_id), to: keyOf(e.to_kind, e.to_id) }))
     .filter((e) => inSet.has(e.from) && inSet.has(e.to));
 
-  // 资料 / 便签不吸进来：它们是独立摆放的（资料在左、结论在侧），整理布局只动任务树与导图树
   const heightOf = (k: string) => {
     const { kind, id } = parseKey(k);
     if (kind === "task") {
@@ -2313,49 +2751,161 @@ async function layoutMind(silent = false) {
     const n = noteById(id);
     return n ? noteSize(n).h : 72;
   };
-  const pos = layoutTree(keys, treeEdges, 340, 46, 118, heightOf);
+
+  // 先按当前纵向位置排一遍：各分支的上下顺序跟用户原来摆的一致，
+  // 否则「整理」会按数据顺序重排，原来的 T1、T2 谁在上谁在下全变。
+  keys.sort((a, b) => posOfKey(a).y - posOfKey(b).y);
+
+  // 一列一层：layoutTree 的 x 就是深度，所以 T1 / T2 在最左，T1.1 在第二列……
+  const pos = keys.length ? layoutTree(keys, treeEdges, LAYOUT_GAP_X, LAYOUT_GAP_Y, 118, heightOf) : new Map();
   // 树根 = 没有父级的节点（子 → 父方向下，「谁是 from」谁就是子）
   const roots = keys.filter((k) => !treeEdges.some((e) => e.from === k));
   const anchorKey = roots[0] ?? keys[0];
-  const base = pos.get(anchorKey);
-  if (!base) return;
-  const anchor = posOfKey(anchorKey);
+  const base = anchorKey ? pos.get(anchorKey) : null;
+  const anchor = anchorKey ? posOfKey(anchorKey) : { x: 0, y: 0 };
 
   // 排完之后如果最上面一排落进工具栏范围，整体往下挪一挪
   const laidYs: number[] = [];
   for (const k of keys) {
     const p = pos.get(k);
-    if (p) laidYs.push(anchor.y + (p.y - base.y));
+    if (p && base) laidYs.push(anchor.y + (p.y - base.y));
   }
-  const minLaidY = laidYs.length ? Math.min(...laidYs) : 0;
+  const minLaidY = laidYs.length ? Math.min(...laidYs) : anchor.y;
   const dy = minLaidY < 110 ? 110 - minLaidY : 0;
 
+  const placed = new Map<string, { x: number; y: number }>();
+  let rightEdge = anchor.x;
+  for (const k of keys) {
+    const p = pos.get(k);
+    if (!p || !base) continue;
+    const x = Math.round(anchor.x + (p.x - base.x));
+    const y = Math.round(anchor.y + (p.y - base.y) + dy);
+    placed.set(k, { x, y });
+    rightEdge = Math.max(rightEdge, x);
+  }
+
+  /* ---- 资料列：所有非任务节点（PDF / 图片 / 便签 / 文字 / 文档 / 导图 / 甘特）归到最右一列 ----
+     分组框按「一个整体」搬：框落位之后再把成员排进框里，否则框会留在原地、里面空掉。 */
+  const boxes = store.notes.filter((n) => kindOf(n) === "box");
+  /** 被框收着的节点（这些跟着框走，不再单独占位） */
+  const inAnyBox = new Set<number>();
+  const boxMembers = new Map<number, BoardNote[]>();
+  const boxHasTask = new Set<number>();
+  for (const b of boxes) {
+    const members: BoardNote[] = [];
+    for (const k of nodesInBox(b)) {
+      const { kind, id } = parseKey(k);
+      if (kind === "task") {
+        boxHasTask.add(b.id); // 框里装着任务：这个框不参与资料列（任务要按层级排）
+        continue;
+      }
+      const n = noteById(id);
+      if (!n || kindOf(n) === "box") continue; // 套娃的框单独当一项，别塞进父框
+      members.push(n);
+      inAnyBox.add(n.id);
+    }
+    members.sort((a, b) => a.y - b.y);
+    boxMembers.set(b.id, members);
+  }
+
+  type Item = { kind: "note"; note: BoardNote; h: number } | { kind: "box"; box: BoardNote; members: BoardNote[]; h: number };
+  const items: Item[] = [];
+  for (const b of boxes) {
+    if (boxHasTask.has(b.id) || inAnyBox.has(b.id)) continue;
+    const members = boxMembers.get(b.id) ?? [];
+    if (!members.length) continue; // 空框当普通节点处理（下面这轮会捞到）
+    const h = 52 + members.reduce((n, m) => n + noteSize(m).h + 10, 0) + 10;
+    items.push({ kind: "box", box: b, members, h });
+  }
+  for (const n of store.notes) {
+    if (inSet.has(keyOf("note", n.id))) continue; // 已连进树里的导图节点
+    if (kindOf(n) === "box" || inAnyBox.has(n.id)) continue;
+    items.push({ kind: "note", note: n, h: noteSize(n).h });
+  }
+  items.sort((a, b) => {
+    const ay = a.kind === "box" ? a.box.y : a.note.y;
+    const by = b.kind === "box" ? b.box.y : b.note.y;
+    return ay - by;
+  });
+
+  const nextX = rightEdge + LAYOUT_GAP_X;
+  const startY = laidYs.length ? Math.min(...laidYs) : anchor.y;
+
+  const placeNote = async (n: BoardNote, x: number, y: number, box?: { w: number; h: number }) => {
+    const same =
+      Math.abs(n.x - x) < 1 &&
+      Math.abs(n.y - y) < 1 &&
+      (!box || (Math.abs(n.w - box.w) < 1 && Math.abs(n.h - box.h) < 1));
+    if (same) return;
+    const patch: Partial<BoardNote> = { x, y };
+    if (box) {
+      patch.w = box.w;
+      patch.h = box.h;
+    }
+    await api.updateNote(n.id, patch);
+    n.x = x;
+    n.y = y;
+    if (box) {
+      n.w = box.w;
+      n.h = box.h;
+    }
+  };
+
   try {
-    for (const k of keys) {
-      const p = pos.get(k);
-      if (!p) continue;
-      const x = Math.round(anchor.x + (p.x - base.x));
-      const y = Math.round(anchor.y + (p.y - base.y) + dy);
+    for (const [k, p] of placed) {
       const { kind, id } = parseKey(k);
       const cur = posOf(kind, id);
-      if (Math.abs(cur.x - x) < 1 && Math.abs(cur.y - y) < 1) continue;
+      if (Math.abs(cur.x - p.x) < 1 && Math.abs(cur.y - p.y) < 1) continue;
       if (kind === "task") {
-        await api.setTaskPos(id, x, y);
+        await api.setTaskPos(id, p.x, p.y);
         const t = taskById(id);
         if (t) {
-          t.wx = x;
-          t.wy = y;
+          t.wx = p.x;
+          t.wy = p.y;
         }
       } else {
-        await api.updateNote(id, { x, y });
+        await api.updateNote(id, { x: p.x, y: p.y });
         const n = noteById(id);
         if (n) {
-          n.x = x;
-          n.y = y;
+          n.x = p.x;
+          n.y = p.y;
         }
       }
     }
-    if (!silent) ElMessage.success(`已重排 ${keys.length} 个节点成树`);
+
+    // 资料列从上往下堆
+    let cy = startY;
+    for (const it of items) {
+      if (it.kind === "box") {
+        const memberW = Math.max(...it.members.map((m) => noteSize(m).w), 300);
+        const boxW = Math.round(memberW + 36);
+        await placeNote(it.box, nextX, cy, { w: boxW, h: Math.round(it.h) });
+        let my = cy + 52;
+        for (const m of it.members) {
+          await placeNote(m, nextX + 18, my);
+          my += noteSize(m).h + 10;
+        }
+        cy += it.h + MAT_GAP;
+      } else {
+        await placeNote(it.note, nextX, cy);
+        cy += it.h + MAT_GAP;
+      }
+    }
+
+    // 整理完把视图带回内容左上角：布局一变就跨好几千像素，
+    // 不跟随一下，人还停在原地看一片空白（这一步以前漏了）。
+    const rect = canvasRef.value?.getBoundingClientRect();
+    const boxes = allBoxes();
+    if (rect && boxes.length) {
+      const minX = Math.min(...boxes.map((b) => b.x));
+      const minY = Math.min(...boxes.map((b) => b.y));
+      panX.value = 50 - minX * zoom.value;
+      panY.value = 130 - minY * zoom.value;
+    }
+
+    if (!silent) {
+      ElMessage.success(`已整理：任务按层级分列，${items.length} 项资料归到右列`);
+    }
   } catch (e) {
     reportError("整理布局", e);
   }
@@ -3242,7 +3792,7 @@ async function buildScene() {
     decompose: varOf("--edge-parent", "#a8b6c8"),
     precede: varOf("--edge-order", "#cf8a28"),
     evidence: varOf("--edge-source", "#2f9e6a"),
-    produce: varOf("--edge-output", "#7a5cc4"),
+    produce: varOf("--edge-output", "#1f8f5f"),
   };
   // 线宽跟屏幕上的 .edge-line.k-* 对齐，否则导出图里四种关系会挤成一样粗细
   const EDGE_W: Record<string, number> = {
@@ -3251,6 +3801,9 @@ async function buildScene() {
     evidence: 1.8,
     produce: 3.4,
   };
+  // 档位色（跟屏幕上 .edge-line.lv-* / 菜单四按钮完全一致）：强=红、参考=黄、弱=淡灰虚线
+  const LV_COLOR = ["#d84338", "#d99b16", "#a8b1bd"];
+  const LV_W = [2, 1.8, 1.4];
   const lines: ExportLine[] = visibleEdgeGeom.value.map((g) => ({
     d: g.d,
     x1: g.x1,
@@ -3258,8 +3811,9 @@ async function buildScene() {
     x2: g.x2,
     y2: g.y2,
     angle: g.angle,
-    color: EDGE_COLOR[g.e.kind] ?? EDGE_COLOR.decompose,
-    width: EDGE_W[g.e.kind] ?? 1.7,
+    color: g.lv >= 0 ? LV_COLOR[g.lv] : EDGE_COLOR[g.e.kind] ?? EDGE_COLOR.decompose,
+    width: g.lv >= 0 ? LV_W[g.lv] : EDGE_W[g.e.kind] ?? 1.7,
+    dash: g.lv === 2 ? [5, 5] : undefined,
     kind: g.e.kind,
   }));
 
@@ -3507,7 +4061,16 @@ async function importFilesAsChildren(
       };
       const id = await api.createNote(fields);
       pushOp(opCreate(id, fields));
-      await api.createEdge(pid, target.kind, target.id, "note", id);
+      // ⚠️ 方向要分清：
+      //  · 挂到「任务」下 = 这份资料是它的**依据**（资料 → 任务），不是它的上级；
+      //  · 挂到「便签/导图」下 = 资料是它的**子级**（子 → 父）。
+      // 早先这里没传 kind，默认按分解建，图片直接变成了任务的父级（树里跑到左边去了）。
+      if (target.kind === "task") {
+        await api.createEdge(pid, "note", id, "task", target.id, "evidence");
+        await api.setTaskRef(pid, target.id, id, 0);
+      } else {
+        await api.createEdge(pid, "note", id, "note", target.id, "decompose");
+      }
       existing++;
       placed++;
     } catch (err) {
@@ -3531,6 +4094,26 @@ function dragHasDoc(e: DragEvent) {
   const dt = e.dataTransfer;
   if (!dt) return false;
   return Array.from(dt.types ?? []).includes(DOC_MIME);
+}
+
+/** 拖的是不是「给 AI 的指令」里收到的产物 */
+function dragHasAiOutput(e: DragEvent) {
+  const dt = e.dataTransfer;
+  if (!dt) return false;
+  return Array.from(dt.types ?? []).includes(AI_OUT_MIME);
+}
+
+/** 产物拖拽带的数据：{ workDir, name } */
+function draggedAiOutput(e: DragEvent): { workDir: string; name: string } | null {
+  try {
+    const raw = e.dataTransfer?.getData(AI_OUT_MIME);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o?.workDir || !o?.name) return null;
+    return { workDir: String(o.workDir), name: String(o.name) };
+  } catch {
+    return null;
+  }
 }
 
 /** 从写作栏拖过来的文档卡片：读出 doc id */
@@ -3562,6 +4145,12 @@ function allowFileDrop(e: DragEvent) {
 }
 
 function onDragOver(e: DragEvent) {
+  // 从「给 AI 的指令」弹窗拖出来的产物
+  if (dragHasAiOutput(e)) {
+    e.preventDefault();
+    dragOver.value = true;
+    return;
+  }
   // 文档卡片和文件一样要能被放下来，但别把 effectAllowed 管太死
   if (dragHasDoc(e)) {
     e.preventDefault();
@@ -3579,6 +4168,10 @@ function onDragLeave(e: DragEvent) {
 // 浏览器默认会直接把这个文件打开，看起来就像应用出了故障 —— 这里一律拦掉，
 // 并且顺手把它导进来（落在画布外也不至于白拖一场）。
 function onWinDragOver(e: DragEvent) {
+  if (dragHasAiOutput(e)) {
+    e.preventDefault();
+    return;
+  }
   if (dragHasDoc(e)) {
     e.preventDefault();
     return;
@@ -3587,6 +4180,26 @@ function onWinDragOver(e: DragEvent) {
   allowFileDrop(e);
 }
 function onWinDrop(e: DragEvent) {
+  if (dragHasAiOutput(e)) {
+    const r = canvasRef.value?.getBoundingClientRect();
+    if (!r) return;
+    if (
+      e.clientX >= r.left &&
+      e.clientX <= r.right &&
+      e.clientY >= r.top &&
+      e.clientY <= r.bottom
+    ) {
+      return; // 画布内 → onDrop（带 .stop）
+    }
+    e.preventDefault();
+    const o = draggedAiOutput(e);
+    if (!o) return;
+    const cx = Math.min(Math.max(e.clientX, r.left + 210), r.right - 210);
+    const cy = Math.min(Math.max(e.clientY, r.top + 190), r.bottom - 120);
+    const w = screenToWorld(cx, cy);
+    void dropOutputOnBoard(o.workDir, o.name, w.x, w.y);
+    return;
+  }
   if (dragHasDoc(e)) {
     // 落在画布外的文档卡片：夹到画布可见范围里，别让用户白拖一场
     const r = canvasRef.value?.getBoundingClientRect();
@@ -3635,6 +4248,15 @@ function onWinDrop(e: DragEvent) {
 
 async function onDrop(e: DragEvent) {
   dragOver.value = false;
+
+  // ⓪ AI 产物：落到哪就在哪生成一张资料卡（不连线，用户自己决定挂给谁）
+  const aiOut = draggedAiOutput(e);
+  if (aiOut) {
+    e.preventDefault();
+    const w = screenToWorld(e.clientX, e.clientY);
+    await dropOutputOnBoard(aiOut.workDir, aiOut.name, w.x, w.y);
+    return;
+  }
 
   // ① 写作栏拖过来的 Markdown 文档 → 放一张文档卡片
   const docId = draggedDocId(e);
@@ -3770,6 +4392,38 @@ function fitView() {
   panY.value = padTop + (availH - (maxY - minY) * z) / 2 - minY * z;
 }
 
+/**
+ * 「看一眼这里」：AI 产物是通过脚本放上白板的，用户这时可能把画布拖到了别处，
+ * 甚至正在看板栏里。不把视口挪过去，卡片就等于没出现。
+ */
+watch(boardFocusRect, (r) => {
+  if (!r) return;
+  const padTop = 130; // 顶部悬浮工具栏占了这么高
+  let tries = 0;
+  const apply = () => {
+    const el = canvasRef.value;
+    if (!el) return;
+    const b = el.getBoundingClientRect();
+    // 白板栏被折叠 / 还没布局时宽度是 0，这时候算出来的视口是错的 —— 等下一帧再试
+    if (b.width < 120 && tries < 12) {
+      tries += 1;
+      window.setTimeout(apply, 180);
+      return;
+    }
+    const z = Math.min(
+      1.2,
+      Math.max(
+        0.3,
+        Math.min((b.width - 120) / Math.max(1, r.w), (b.height - padTop - 60) / Math.max(1, r.h))
+      )
+    );
+    zoom.value = z;
+    panX.value = (b.width - r.w * z) / 2 - r.x * z;
+    panY.value = padTop + Math.max(0, (b.height - padTop - 60 - r.h * z) / 2) - r.y * z;
+  };
+  apply();
+});
+
 async function clearBoard() {
   if (!store.notes.length) {
     ElMessage.info("白板上还没有卡片");
@@ -3786,8 +4440,8 @@ async function clearBoard() {
   }
   try {
     for (const n of [...store.notes]) {
-      if (n.kind === "file" && n.file_id != null) await api.deleteAsset(n.file_id);
-      else await api.deleteNote(n.id);
+      // 一律软删除进回收站：资料的文件本体先留着，才能"放回白板"
+      await api.deleteNote(n.id);
     }
     await store.refreshBoard();
     undoStack.length = 0;
@@ -3841,6 +4495,13 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === "g") {
     e.preventDefault();
     void groupSelection();
+    return;
+  }
+  // 点了线（菜单浮着）时，Delete / Backspace 直接删这条线 ——
+  // 不必非得把手挪到菜单上点「删除」。
+  if ((e.key === "Delete" || e.key === "Backspace") && edgePick.value) {
+    e.preventDefault();
+    void removeEdgeById();
     return;
   }
   if (!sel) return;
@@ -4144,12 +4805,19 @@ const numOf = (t: Task) => store.numberOf(t.id);
             <li>拖<b>父节点</b>时，它的下级会一起走</li>
             <li><b>中键</b>或按住<b>空格</b>+左键 = 平移画布；<b>滚轮</b> = 缩放</li>
             <li>
-              拖卡片<span class="hint-port out"></span>右侧圆点到别的卡片 → 本卡片当<b>上级</b>
+              拖卡片<span class="hint-port out"></span><b>左侧</b>圆点到别的卡片 → 本卡片当<b>上级</b>
+              （产出从左边流进去）
             </li>
             <li>
-              拖卡片<span class="hint-port in"></span>左侧圆点到别的卡片 → 本卡片当<b>下级</b>
+              拖卡片<span class="hint-port in"></span><b>右侧</b>圆点到别的卡片 → 本卡片当<b>下级</b>
+              （对方把产出送过来）
             </li>
+            <li>左键拖动 = 父级带着下级一起走；<b>右键拖动</b> = 只挪这一张，不带下级</li>
             <li><b>Tab</b> 加下一级 · <b>Enter</b> 加同级 · <b>Delete</b> 删除 · <b>F2</b> 改名</li>
+            <li>
+              写文字时：<b>Enter</b> 确认输入 · <b>Shift + Enter</b> 或 <b>Ctrl + Enter</b> 换行 ·
+              <b>Esc</b> 取消
+            </li>
             <li><b>双击</b>改文字；选中后用工具栏挂资料、写进文档</li>
           </ul>
         </div>
@@ -4185,24 +4853,54 @@ const numOf = (t: Task) => store.numberOf(t.id);
       @click.stop
       @contextmenu.prevent.stop
     >
-      <!-- 连线就是「支撑」，唯一要标的是它有多硬：强依据 / 参考 / 弱参考 -->
+      <!-- 一排四档：强依据（红）/ 参考（黄）/ 弱参考（灰）/ 产物（绿）。
+           刻意不再出现「分解 / 先后 / 依据」—— 那三个是内部结构推断出来的，
+           不是用户要做的选择题。点一下换档，点当前档等于关掉菜单。 -->
+      <div class="em-grid">
+        <button
+          v-for="k in LINE_STATES"
+          :key="k.v"
+          class="em-kind"
+          :class="['s-' + k.v, { on: lineStateCurrent() === k.v }]"
+          :title="k.hint"
+          @click="setLineState(k.v)"
+        >
+          <span class="em-dot" :style="{ background: k.color }"></span>{{ k.label }}
+        </button>
+      </div>
       <div class="em-row">
-        <button class="em-del" title="删除这条连线" @click="removeEdgeById">
-          <AppIcon name="trash" :size="14" />
+        <button class="em-del" title="删除这条连线（也可以直接按 Delete）" @click="removeEdgeById">
+          <AppIcon name="trash" :size="13" />
           <span>删除</span>
         </button>
-        <div class="em-levels">
-          <button
-            v-for="l in LEVEL_META"
-            :key="l.v"
-            class="em-lv"
-            :class="{ on: edgeLevel() === l.v }"
-            :title="l.hint"
-            @click="setEdgeLevel(l.v)"
-          >
-            {{ l.label }}
-          </button>
-        </div>
+        <span class="em-tip">也可以直接按 Delete</span>
+      </div>
+    </div>
+
+    <!-- 分组框的四档菜单：跟连线同一排按钮，贴在框头那个标签上 -->
+    <div
+      v-if="boxPick"
+      ref="boxMenuEl"
+      class="edge-menu box-menu"
+      :class="{ flip: boxMenuFlip }"
+      :style="{ left: boxPick.x + 'px', top: boxPick.y + 'px' }"
+      @pointerdown.stop
+      @mousedown.stop
+      @mouseup.stop
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <div class="em-grid">
+        <button
+          v-for="k in LINE_STATES"
+          :key="k.v"
+          class="em-kind"
+          :class="['s-' + k.v, { on: boxStateOf(boxPick.id) === k.v }]"
+          :title="k.hint"
+          @click="setBoxState(k.v)"
+        >
+          <span class="em-dot" :style="{ background: k.color }"></span>{{ k.label }}
+        </button>
       </div>
     </div>
 
@@ -4295,17 +4993,39 @@ const numOf = (t: Task) => store.numberOf(t.id);
             </template>
             <template v-else>{{ n.text || "分组" }}</template>
           </div>
+          <span
+            v-if="isOutputBox(n)"
+            class="box-tag-out"
+            title="AI 产物：这一组是任务的产出物，用绿色产物线连回任务"
+            >产物</span
+          >
           <button
+            v-else
             class="box-cluster"
             :class="'cs-' + strengthOf(n)"
-            :title="CLUSTER_MAP.get(strengthOf(n))?.hint + '（点一下换下一档）'"
+            :title="
+              (CLUSTER_MAP.get(strengthOf(n))?.hint ?? '') +
+              '（点一下换成强依据 / 参考 / 弱参考 / 产物）'
+            "
             @pointerdown.stop
-            @click.stop="cycleStrength(n)"
+            @click.stop="openBoxMenu($event, n)"
           >
             {{ CLUSTER_MAP.get(strengthOf(n))?.label }}
           </button>
         </div>
         <div class="node-tools">
+          <button
+            :class="{ on: isOutputBox(n) }"
+            :title="
+              isOutputBox(n)
+                ? '取消产物标记'
+                : '标记为 AI 产物组（产物线只表示来源，不进 AI 参考）'
+            "
+            @pointerdown.stop
+            @click.stop="toggleOutputBox(n)"
+          >
+            ◈
+          </button>
           <button title="加下一级（Tab）" @pointerdown.stop @click.stop="addChildNote(n.id)">
             ＋子
           </button>
@@ -4359,19 +5079,36 @@ const numOf = (t: Task) => store.numberOf(t.id);
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
-            markerWidth="5.5"
-            markerHeight="5.5"
+            markerUnits="userSpaceOnUse"
+            markerWidth="10"
+            markerHeight="10"
             orient="auto-start-reverse"
           >
             <path :class="'mk-' + mk" d="M0 0 L10 5 L0 10 z" />
+          </marker>
+          <!-- 档位箭头：强 / 参考 / 弱参考 三色（支撑类连线按档位走，不按类型走） -->
+          <marker
+            v-for="lv in [0, 1, 2]"
+            :id="'wb-arrow-lv' + lv"
+            :key="'lv' + lv"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerUnits="userSpaceOnUse"
+            markerWidth="10"
+            markerHeight="10"
+            orient="auto-start-reverse"
+          >
+            <path :class="'mk-lv' + lv" d="M0 0 L10 5 L0 10 z" />
           </marker>
           <marker
             id="wb-arrow-live"
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
-            markerWidth="5.5"
-            markerHeight="5.5"
+            markerUnits="userSpaceOnUse"
+            markerWidth="10"
+            markerHeight="10"
             orient="auto-start-reverse"
           >
             <path d="M0 0 L10 5 L0 10 z" />
@@ -4380,9 +5117,15 @@ const numOf = (t: Task) => store.numberOf(t.id);
         <g v-for="g in visibleEdgeGeom" :key="g.e.id">
           <path
             class="edge-line"
-            :class="['k-' + g.e.kind, { picked: edgePick && edgePick.id === g.e.id }]"
+            :class="[
+              'k-' + g.e.kind,
+              g.lv >= 0 ? 'lv-' + g.lv : '',
+              { picked: edgePick && edgePick.id === g.e.id },
+            ]"
             :d="g.d"
-            :marker-end="'url(#wb-arrow-' + g.e.kind + ')'"
+            :marker-end="
+              g.lv >= 0 ? 'url(#wb-arrow-lv' + g.lv + ')' : 'url(#wb-arrow-' + g.e.kind + ')'
+            "
           />
           <path class="edge-hit" :d="g.d" @click.stop="openEdgeMenu(g.e, $event)" />
         </g>
@@ -4532,14 +5275,14 @@ const numOf = (t: Task) => store.numberOf(t.id);
           </button>
         </div>
         <span
-          class="node-port in"
-          title="输入端口：把别的卡片拖到这里 → 它就成为这张卡片的上级"
-          @pointerdown="startLinkPort($event, 'task', t.id, 'in')"
+          class="node-port out"
+          title="输出端口（左侧）：产出从这里出去。拉线到别的卡片 → 它成为这张卡的上级"
+          @pointerdown="startLinkPort($event, 'task', t.id, 'out')"
         ></span>
         <span
-          class="node-port out"
-          title="输出端口：从这里拖到另一张卡片 → 那张卡片成为它的下级"
-          @pointerdown="startLinkPort($event, 'task', t.id, 'out')"
+          class="node-port in"
+          title="输入端口（右侧）：在这里接收下级交上来的产出。拉线到别的卡片 → 它成为这张卡的下级"
+          @pointerdown="startLinkPort($event, 'task', t.id, 'in')"
         ></span>
       </div>
 
@@ -4627,6 +5370,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
               class="note-edit mind-edit"
               @pointerdown.stop
               @blur="commitNoteText(n)"
+              @keydown.enter.exact.prevent="commitNoteText(n)"
               @keydown.esc="editingNote = null"
             ></textarea>
           </template>
@@ -4642,6 +5386,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
               class="note-edit"
               @pointerdown.stop
               @blur="commitNoteText(n)"
+              @keydown.enter.exact.prevent="commitNoteText(n)"
               @keydown.esc="editingNote = null"
             ></textarea>
           </template>
@@ -4658,6 +5403,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
               placeholder="写点想法…"
               @pointerdown.stop
               @blur="commitNoteText(n)"
+              @keydown.enter.exact.prevent="commitNoteText(n)"
               @keydown.esc="editingNote = null"
             ></textarea>
           </template>
@@ -4827,14 +5573,14 @@ const numOf = (t: Task) => store.numberOf(t.id);
         </div>
 
         <span
-          class="node-port in"
-          title="输入端口：把别的卡片拖到这里 → 它就成为这张卡片的上级"
-          @pointerdown="startLinkPort($event, 'note', n.id, 'in')"
+          class="node-port out"
+          title="输出端口（左侧）：产出从这里出去。拉线到别的卡片 → 它成为这张卡的上级"
+          @pointerdown="startLinkPort($event, 'note', n.id, 'out')"
         ></span>
         <span
-          class="node-port out"
-          title="输出端口：从这里拖到另一张卡片 → 那张卡片成为它的下级"
-          @pointerdown="startLinkPort($event, 'note', n.id, 'out')"
+          class="node-port in"
+          title="输入端口（右侧）：在这里接收下级交上来的产出。拉线到别的卡片 → 它成为这张卡的下级"
+          @pointerdown="startLinkPort($event, 'note', n.id, 'in')"
         ></span>
         <span class="node-resize" title="拖动改大小" @pointerdown="startResizeNode($event, n)"></span>
       </div>
@@ -4876,7 +5622,7 @@ const numOf = (t: Task) => store.numberOf(t.id);
     >
       <div class="wm-h">
         <span class="wm-ico">＋</span>
-        <span class="wm-name">{{ typeMenu.from.role === "out" ? "新建下级" : "新建上级" }}</span>
+        <span class="wm-name">{{ typeMenu.from.role === "out" ? "新建上级" : "新建下级" }}</span>
       </div>
       <button
         v-for="t in NODE_TYPES"
@@ -5596,61 +6342,64 @@ const numOf = (t: Task) => store.numberOf(t.id);
 .edge-menu .em-del:hover {
   background: rgb(220 83 70 / 18%);
 }
-/* 三种关系一行排开 */
+/* 一排四档：每个按钮 = 色点 + 名称，单行，比原来窄一圈 */
 .edge-menu .em-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 2px;
+  display: flex;
+  gap: 3px;
+  padding-bottom: 5px;
+  margin-bottom: 5px;
+  border-bottom: 1px solid var(--hairline);
 }
-/* 关系项：左边一个色点，右边两行（关系名 + 一句话说明） */
 .edge-menu .em-kind {
-  display: grid;
-  grid-template-columns: auto auto;
-  grid-template-rows: auto auto;
-  column-gap: 6px;
+  display: inline-flex;
   align-items: center;
-  padding: 4px 8px 4px 7px;
+  gap: 5px;
+  padding: 5px 7px;
   border-radius: 6px;
-  text-align: left;
+  font-size: 11.5px;
+  line-height: 15px;
+  font-weight: 600;
+  color: var(--text-3);
+  white-space: nowrap;
 }
 .edge-menu .em-dot {
-  grid-row: 1 / span 2;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--edge-parent);
+  flex: 0 0 auto;
 }
-.edge-menu .em-kind b {
-  font-size: 12.5px;
-  line-height: 16px;
-  font-weight: 600;
+/* 选中 = 整块染成这一档的颜色 + 白字：比只染一个小点清楚得多，
+   四个颜色本身就在告诉用户「这条线有多硬」。 */
+.edge-menu .em-kind.on {
+  color: #fff;
 }
-.edge-menu .em-kind small {
-  font-size: 10px;
-  line-height: 13px;
+.edge-menu .em-kind.on .em-dot {
+  background: #fff !important;
+  opacity: 0.9;
+}
+.edge-menu .em-kind.s-strong.on {
+  background: #d84338;
+}
+.edge-menu .em-kind.s-ref.on {
+  background: #d99b16;
+}
+.edge-menu .em-kind.s-weak.on {
+  background: #8f98a5;
+}
+.edge-menu .em-kind.s-produce.on {
+  background: #1f8f5f;
+}
+.edge-menu .em-tip {
+  align-self: center;
+  padding-left: 2px;
+  font-size: 10.5px;
   color: var(--text-faint);
 }
-.edge-menu .em-dot.k-decompose {
-  background: var(--edge-parent);
-}
-.edge-menu .em-dot.k-precede {
-  background: var(--edge-order);
-}
-.edge-menu .em-dot.k-evidence {
-  background: var(--edge-source);
-}
-.edge-menu .em-dot.k-produce {
-  background: var(--edge-output);
-}
-.edge-menu .em-kind.on {
-  background: var(--accent-soft);
-}
-.edge-menu .em-kind.on b {
-  color: var(--accent);
-}
-.edge-menu .em-kind.on small {
-  color: var(--accent);
-  opacity: 0.75;
+/* 分组框那个小菜单只有一排按钮，不需要那条分隔线 */
+.box-menu .em-grid {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: none;
 }
 
 .wb-edges {
@@ -5724,6 +6473,36 @@ const numOf = (t: Task) => store.numberOf(t.id);
 }
 .mk-produce {
   fill: var(--edge-output);
+}
+/* 支撑类连线按**档位**配色（覆盖上面的类型色）：
+   强依据 = 红、参考 = 黄、弱参考 = 淡灰虚线 —— 跟菜单里那四个按钮同一套颜色。
+   颜色写死 hex：导出走 Canvas，`var(--x)` 在 ctx 里是无效值。 */
+.edge-line.lv-0 {
+  stroke: #d84338;
+  stroke-width: 2;
+  stroke-dasharray: none;
+  opacity: 0.92;
+}
+.edge-line.lv-1 {
+  stroke: #d99b16;
+  stroke-width: 1.8;
+  stroke-dasharray: none;
+  opacity: 0.9;
+}
+.edge-line.lv-2 {
+  stroke: #a8b1bd;
+  stroke-width: 1.4;
+  stroke-dasharray: 5 5;
+  opacity: 0.92;
+}
+.mk-lv0 {
+  fill: #d84338;
+}
+.mk-lv1 {
+  fill: #d99b16;
+}
+.mk-lv2 {
+  fill: #a8b1bd;
 }
 /* 点中的那条线：亮一档，配合菜单指示"改的是它" */
 .edge-line.picked {
@@ -6034,6 +6813,19 @@ const numOf = (t: Task) => store.numberOf(t.id);
 }
 /* 强度徽章：白底彩字，跟左侧的框色标题条区分开
    （两个都做成实底同色，就看不出哪个是名字、哪个是等级） */
+/* 产物组：绿标，和强度标签同一个位置，但不可点（它不是"有多硬"） */
+.box-tag-out {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid #1f8f5f;
+  border-radius: 999px;
+  background: color-mix(in srgb, #1f8f5f 12%, transparent);
+  color: #167a50;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.3px;
+}
 .box-cluster {
   flex: none;
   padding: 1px 8px;
@@ -6514,7 +7306,8 @@ html.dark .box-cluster.cs-weak {
 }
 
 /* ---------- 输入 / 输出端口 ----------
-   右侧圆点 = 输出（本卡片当上级）；左侧圆点 = 输入（本卡片当下级）。
+   ⚠️ 全板统一：**左侧圆点 = 输出，右侧圆点 = 输入**。
+   子级的产出从子级左端口出去，流进父级右端口，箭头永远指向父级。
    平时完全隐藏，鼠标移到卡片上才出现 —— 常显的两个小圆点在几十张卡片时很吵。
    正在拖线时全部半显，指示哪些地方可以落点。 */
 .node-port {
@@ -6528,7 +7321,11 @@ html.dark .box-cluster.cs-weak {
   border: 2px solid var(--accent);
   cursor: crosshair;
   z-index: 5;
-  opacity: 0;
+  /* 常显（淡）：线的两头到底连在卡片哪个位置，不悬停也要能看清。
+     以前完全隐藏，用户只能靠线的走向猜"是从这个端口进的吗"。
+     外圈再垫一圈底色，圆点压在卡片边缘时也有个"咬出来"的缺口，线头不会糊进卡片。 */
+  opacity: 0.6;
+  box-shadow: 0 0 0 2px var(--bg-elevated);
   transition: opacity 0.13s var(--ease), transform 0.13s var(--ease),
     background 0.13s var(--ease);
 }
@@ -6539,12 +7336,13 @@ html.dark .box-cluster.cs-weak {
   inset: -7px;
   border-radius: 50%;
 }
-.node-port.in {
+/* 左 = 输出，右 = 输入（与 portAnchor 一致，改一处必须改另一处） */
+.node-port.out {
   left: -7px;
   transform: translateY(-50%);
   border-color: var(--brand-2);
 }
-.node-port.out {
+.node-port.in {
   right: -7px;
   transform: translateY(-50%);
 }
@@ -6563,8 +7361,9 @@ html.dark .box-cluster.cs-weak {
 .node-port:hover {
   transform: translateY(-50%) scale(1.3);
   background: var(--accent);
+  opacity: 1;
 }
-.node-port.in:hover {
+.node-port.out:hover {
   background: var(--brand-2);
 }
 
@@ -6578,7 +7377,7 @@ html.dark .box-cluster.cs-weak {
   border: 1.6px solid var(--accent);
   vertical-align: middle;
 }
-.hint-port.in {
+.hint-port.out {
   border-color: var(--brand-2);
 }
 

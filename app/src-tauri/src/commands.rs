@@ -2,6 +2,7 @@ use crate::db::Db;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
 use tauri::{
     webview::{NewWindowResponse, WebviewBuilder},
     AppHandle, LogicalPosition, LogicalSize, Manager, State, WebviewUrl,
@@ -827,7 +828,12 @@ pub fn delete_tag(db: State<Db>, id: i64) -> Result<(), String> {
 pub fn get_settings(global: State<GlobalDb>) -> Result<Value, String> {
     let conn = global.0.lock().map_err(map_err)?;
     let theme = get_setting(&conn, "theme").map_err(map_err)?;
-    Ok(serde_json::json!({ "theme": theme.unwrap_or_else(|| "light".into()) }))
+    // 回收站保留天数：30 / 60 / 0（永不清理）
+    let trash_days = get_setting(&conn, "trash_days").map_err(map_err)?;
+    Ok(serde_json::json!({
+        "theme": theme.unwrap_or_else(|| "light".into()),
+        "trash_days": trash_days.and_then(|v| v.parse::<i64>().ok()).unwrap_or(30),
+    }))
 }
 
 #[tauri::command]
@@ -938,7 +944,9 @@ fn row_to_note(r: &Row) -> rusqlite::Result<NoteOut> {
 pub fn list_notes(db: State<Db>, project_id: i64) -> Result<Vec<NoteOut>, String> {
     let conn = db.0.lock().map_err(map_err)?;
     let mut stmt = conn
-        .prepare(&format!("{NOTE_SELECT} WHERE project_id=?1 ORDER BY id"))
+        .prepare(&format!(
+            "{NOTE_SELECT} WHERE project_id=?1 AND deleted_at IS NULL ORDER BY id"
+        ))
         .map_err(map_err)?;
     let rows = stmt.query_map(params![project_id], row_to_note).map_err(map_err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
@@ -1033,13 +1041,67 @@ pub fn update_note(db: State<Db>, id: i64, patch: NotePatch) -> Result<(), Strin
     Ok(())
 }
 
-// Delete a node. If it was an uploaded file the file is dropped from disk too.
+// Delete a node → 进回收站（软删除）。
 #[tauri::command]
-pub fn delete_note(db: State<Db>, dir: State<DataDir>, id: i64) -> Result<(), String> {
+/// 删除白板卡片 = **进回收站**（软删除），不再当场抹掉。
+/// 文件本体也先留着，回收站里能恢复；真要清干净走 purge_note / 到期清理。
+pub fn delete_note(db: State<Db>, id: i64) -> Result<(), String> {
     let conn = db.0.lock().map_err(map_err)?;
-    // 注意：file_id 对便签/导图/文字等节点是 NULL，必须按 Option<i64> 读，
-    // 直接 r.get(0) 会在 NULL 上报 "Invalid column type Null"，
-    // 结果是**任何非资料卡片都删不掉**。.optional() 只处理"没有这一行"，管不了 NULL。
+    conn.execute(
+        "UPDATE board_notes SET deleted_at=datetime('now','localtime') WHERE id=?1",
+        params![id],
+    )
+    .map_err(map_err)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct NoteTrashItem {
+    pub id: i64,
+    pub text: String,
+    pub kind: String,
+    pub file_name: Option<String>,
+    pub deleted_at: Option<String>,
+}
+
+/// 回收站里的白板卡片（当前项目）
+#[tauri::command]
+pub fn list_deleted_notes(db: State<Db>) -> Result<Vec<NoteTrashItem>, String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.text, COALESCE(n.kind,'note'), f.name, n.deleted_at
+             FROM board_notes n LEFT JOIN wb_files f ON f.id = n.file_id
+             WHERE n.deleted_at IS NOT NULL
+             ORDER BY n.deleted_at DESC",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(NoteTrashItem {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                kind: r.get(2)?,
+                file_name: r.get(3)?,
+                deleted_at: r.get(4)?,
+            })
+        })
+        .map_err(map_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn restore_note(db: State<Db>, id: i64) -> Result<(), String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    conn.execute("UPDATE board_notes SET deleted_at=NULL WHERE id=?1", params![id])
+        .map_err(map_err)?;
+    Ok(())
+}
+
+/// 彻底删除：连边和文件本体一起清掉
+#[tauri::command]
+pub fn purge_note(db: State<Db>, dir: State<DataDir>, id: i64) -> Result<(), String> {
+    let conn = db.0.lock().map_err(map_err)?;
     let file_id: Option<i64> = conn
         .query_row("SELECT file_id FROM board_notes WHERE id=?1", params![id], |r| {
             r.get::<_, Option<i64>>(0)
@@ -1053,6 +1115,48 @@ pub fn delete_note(db: State<Db>, dir: State<DataDir>, id: i64) -> Result<(), St
         drop_file(&conn, &dir, fid)?;
     }
     Ok(())
+}
+
+/// 到期清理的实体（打开项目时也会调，所以参数不用 State，方便复用）
+pub(crate) fn purge_expired_on(conn: &Connection, dir: &DataDir, days: i64) -> Result<i64, String> {
+    if days <= 0 {
+        return Ok(0);
+    }
+    let expired: Vec<(i64, Option<i64>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_id FROM board_notes
+                 WHERE deleted_at IS NOT NULL
+                   AND datetime(deleted_at) < datetime('now','localtime', ?1)",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![format!("-{days} days")], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+            })
+            .map_err(map_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_err)?
+    };
+    let mut n = 0;
+    for (id, fid) in expired {
+        conn.execute("DELETE FROM board_notes WHERE id=?1", params![id])
+            .map_err(map_err)?;
+        if let Some(f) = fid {
+            let _ = drop_file(conn, dir, f);
+        }
+        n += 1;
+    }
+    if n > 0 {
+        prune_orphan_edges(conn).map_err(map_err)?;
+    }
+    Ok(n)
+}
+
+/// 到期清理：回收站里超过 N 天的卡片直接抹掉（days<=0 = 永不清理）
+#[tauri::command]
+pub fn purge_expired_notes(db: State<Db>, dir: State<DataDir>, days: i64) -> Result<i64, String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    purge_expired_on(&conn, &dir, days)
 }
 
 #[derive(Serialize)]
@@ -1095,6 +1199,64 @@ pub fn list_edges(db: State<Db>, project_id: i64) -> Result<Vec<EdgeOut>, String
     rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
 }
 
+// ---------- 层级守卫：结构边必须是一张 DAG ----------
+//
+// 用户定的硬规则（2026-10-25）：依据只能从**下级指向上级**，不管差几级；
+// 上级永远不能成为自己直系后代的依据；旁系（T1.1 → T2.1.1）可以。
+// 「分解」和「依据」共用同一张有向图，方向都是「下级/支撑方 → 上级/被支撑方」，
+// 一旦出现环，任务编号、层级遍历、AI 组装上下文全都会当场转不出来。
+//
+// 前端 Whiteboard.vue 的 linkRuleError() 已经拦过一遍，这里是**最后一道闸**：
+// AI 自动建边、大纲导入、老数据迁移都可能绕过界面直接写库。
+
+/// 参与层级判定的边类型。「产物」是交付关系、「先后」是时间顺序，都不构成上下级。
+const STRUCT_KINDS: [&str; 2] = ["decompose", "evidence"];
+
+type NodeKey = (String, i64);
+
+/// 读出项目里全部结构边，返回 (起点, 终点)。起点是下级，终点是上级。
+fn structural_edges(conn: &Connection, project_id: i64) -> Result<Vec<(NodeKey, NodeKey)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT from_kind,from_id,to_kind,to_id FROM board_edges
+             WHERE project_id=?1 AND kind IN ('decompose','evidence')",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map(params![project_id], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, i64>(1)?),
+                (r.get::<_, String>(2)?, r.get::<_, i64>(3)?),
+            ))
+        })
+        .map_err(map_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_err)
+}
+
+/// 顺着结构边从 from 走，能不能多跳走到 to。
+/// 能走到 = 新连的这条（to 方向）会把整张图绕成一个环。
+fn reaches(edges: &[(NodeKey, NodeKey)], from: &NodeKey, to: &NodeKey) -> bool {
+    let mut adj: HashMap<NodeKey, Vec<NodeKey>> = HashMap::new();
+    for (a, b) in edges {
+        adj.entry(a.clone()).or_default().push(b.clone());
+    }
+    let mut seen: HashSet<NodeKey> = HashSet::new();
+    let mut queue: VecDeque<NodeKey> = VecDeque::new();
+    seen.insert(from.clone());
+    queue.push_back(from.clone());
+    while let Some(cur) = queue.pop_front() {
+        for next in adj.get(&cur).into_iter().flatten() {
+            if next == to {
+                return true;
+            }
+            if seen.insert(next.clone()) {
+                queue.push_back(next.clone());
+            }
+        }
+    }
+    false
+}
+
 #[tauri::command]
 pub fn create_edge(
     db: State<Db>,
@@ -1104,8 +1266,7 @@ pub fn create_edge(
     to_kind: String,
     to_id: i64,
     kind: Option<String>,
-) -> Result<i64, String> {
-    if from_kind == to_kind && from_id == to_id {
+) -> Result<i64, String> {    if from_kind == to_kind && from_id == to_id {
         return Err("不能连接到自身".into());
     }
     if (from_kind != "task" && from_kind != "note") || (to_kind != "task" && to_kind != "note") {
@@ -1133,6 +1294,22 @@ pub fn create_edge(
         return Ok(id);
     }
     let kind = normalize_edge_kind(kind.as_deref());
+    // 层级守卫：先按「现有结构边」建图，看新边会不会把图绕成环。
+    // 判定：从新边终点（上级/被支撑方）出发，若能走回起点（下级/支撑方），
+    // 说明这两个节点本来就在同一条直系链上，再加这条边就是一个环。
+    if STRUCT_KINDS.contains(&kind.as_str()) {
+        let edges = structural_edges(&conn, project_id)?;
+        let a: NodeKey = (from_kind.clone(), from_id);
+        let b: NodeKey = (to_kind.clone(), to_id);
+        if reaches(&edges, &b, &a) {
+            return Err(if kind == "evidence" {
+                "上级不能作为自己下级的依据：依据只能从下级指向上级，反着连会绕成死循环"
+                    .into()
+            } else {
+                "这两个节点已经在同一条上下级链上，再连会绕成圈".into()
+            });
+        }
+    }
     conn.execute(
         "INSERT INTO board_edges(project_id,from_kind,from_id,to_kind,to_id,kind,strength)
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -1794,6 +1971,16 @@ pub fn open_project_db(
     let pc = open_project_db_at(&dir.root(), project_id, &name, &folder)?;
     // 老数据可能存着绝对路径，切进来时顺手统一成相对
     normalize_asset_paths(&pc, &dir);
+    // 回收站到期清理：每次打开项目顺手跑一次
+    // （天数存在全局设置 trash_days，默认 30 天；填 0 = 永不清理）
+    let days: i64 = {
+        let g = global.0.lock().map_err(map_err)?;
+        get_setting(&g, "trash_days")
+            .map_err(map_err)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(30)
+    };
+    let _ = purge_expired_on(&pc, &dir, days);
     {
         let mut g = db.0.lock().map_err(map_err)?;
         *g = pc;
@@ -3164,6 +3351,40 @@ mod tests {
             .unwrap();
         assert_eq!(pt2, "", "显式传空应当清空");
     }
+
+    /// 连线层级守卫：依据只能「下级 → 上级」，上级不能当直系后代的依据，旁系放行。
+    ///
+    /// 树的形状（分解边一律存「子 → 父」）：
+    ///   T1 ← T1.1 ← T1.1.1      T2 ← T2.1
+    #[test]
+    fn edge_guard_allows_uphill_and_cousins_but_rejects_cycles() {
+        let t = |i: i64| ("task".to_string(), i);
+        let edges: Vec<(NodeKey, NodeKey)> = vec![
+            (t(11), t(1)),      // T1.1 是 T1 的下级
+            (t(111), t(11)),    // T1.1.1 是 T1.1 的下级
+            (t(21), t(2)),      // T2.1 是 T2 的下级
+        ];
+        // create_edge 里的判定是 reaches(现有图, 新边终点, 新边起点)：
+        // 从「上级/被支撑方」能走回「下级/支撑方」就说明加这条边成环。
+
+        // 1) 孙子给爷爷当依据（T1.1.1 → T1）—— 差两级也合法
+        assert!(!reaches(&edges, &t(1), &t(111)), "下级指向上级，不该判成环");
+
+        // 2) 上级给亲儿子当依据（T1 → T1.1）—— 直接成环
+        assert!(reaches(&edges, &t(11), &t(1)), "T1.1 能走到 T1，加 T1→T1.1 就是环");
+
+        // 3) 上级给孙子当依据（T1 → T1.1.1）—— 隔一层同样是环
+        assert!(reaches(&edges, &t(111), &t(1)), "隔两级的直系后代也要拦住");
+
+        // 4) 旁系：T1.1 给 T2.1 当依据 —— 不在同一条链上，必须放行
+        assert!(!reaches(&edges, &t(21), &t(11)), "旁系不在同一条链上，不能误伤");
+
+        // 5) 旁系一旦连上，反方向就再也连不通了 —— 这就是用户怕的"死循环"被挡住
+        let mut e2 = edges.clone();
+        e2.push((t(11), t(21))); // T1.1 → T2.1（旁系依据，合法）
+        // 想再连 T2.1 → T1.1：从 T1.1 能顺着这条边走到 T2.1，所以判成环
+        assert!(reaches(&e2, &t(11), &t(21)), "旁系连上后，反方向必须判成环");
+    }
 }
 
 
@@ -3288,19 +3509,31 @@ pub fn set_task_ref(
             .map_err(map_err)?,
     };
     // 传了 point 才覆盖；没传就保留原来的（换档不该顺手清掉要点）
-    let sql = if point.is_some() {
-        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
-         VALUES(?1,?2,?3,?4,?5,?6)
-         ON CONFLICT(task_id,note_id)
-         DO UPDATE SET level=excluded.level, ord=excluded.ord, point=excluded.point"
-    } else {
-        "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
-         VALUES(?1,?2,?3,?4,?5,'')
-         ON CONFLICT(task_id,note_id)
-         DO UPDATE SET level=excluded.level, ord=excluded.ord"
-    };
-    conn.execute(sql, params![project_id, task_id, note_id, lv, next_ord, pt])
+    //
+    // ⚠️ 两条分支的 SQL **必须各自配自己的参数个数**。
+    //    之前 unify 成一条 params![...6 个] 却让「没传 point」那条 SQL 只写了
+    //    5 个占位符（第 6 个是字面量 ''），rusqlite 直接抛
+    //    「Wrong number of parameters passed to query. Got 6, needed 5」——
+    //    表现就是改线的关系类型失败、整条快捷菜单点不动。
+    if point.is_some() {
+        conn.execute(
+            "INSERT INTO task_refs(project_id,task_id,note_id,level,ord,point)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(task_id,note_id)
+             DO UPDATE SET level=excluded.level, ord=excluded.ord, point=excluded.point",
+            params![project_id, task_id, note_id, lv, next_ord, pt],
+        )
         .map_err(map_err)?;
+    } else {
+        conn.execute(
+            "INSERT INTO task_refs(project_id,task_id,note_id,level,ord)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(task_id,note_id)
+             DO UPDATE SET level=excluded.level, ord=excluded.ord",
+            params![project_id, task_id, note_id, lv, next_ord],
+        )
+        .map_err(map_err)?;
+    }
     let id: i64 = conn
         .query_row(
             "SELECT id FROM task_refs WHERE task_id=?1 AND note_id=?2",
@@ -3319,5 +3552,249 @@ pub fn delete_task_ref(db: State<Db>, task_id: i64, note_id: i64) -> Result<(), 
         params![task_id, note_id],
     )
     .map_err(map_err)?;
+    Ok(())
+}
+
+// ------------------------------------------------------------------ AI 工作目录
+//
+// 「发送到 AI」不是把一大段文字塞进命令行，而是先给 AI 准备好一个**文件夹**：
+//   <项目>/AI产出/<任务>/
+//     brief.md   任务指令全文（现在预览里看到的那一份）
+//     refs/      参考材料原件（PDF / 图片，AI 自己读）
+//     out/       AI 往这里写产物
+// 中文正文写成 UTF-8 文件，命令行上不出现中文，也就没有转义和代码页的问题。
+
+#[derive(Serialize)]
+pub struct AiPrepOut {
+    pub dir: String,
+    pub brief: String,
+}
+
+/// 建好工作目录、写 brief.md、把指定资料拷进 refs/。重复发同一任务会复用同一个目录。
+#[tauri::command]
+pub fn ai_prepare(
+    db: State<Db>,
+    dir: State<DataDir>,
+    project_id: i64,
+    title: String,
+    brief: String,
+    asset_ids: Vec<i64>,
+) -> Result<AiPrepOut, String> {
+    let conn = db.0.lock().map_err(map_err)?;
+    let proj = project_dir(&conn, &dir, project_id);
+    let base = proj.join("AI产出").join(clean_path_name(&title));
+    std::fs::create_dir_all(base.join("refs")).map_err(|e| format!("建目录失败：{e}"))?;
+    std::fs::create_dir_all(base.join("out")).map_err(|e| format!("建目录失败：{e}"))?;
+
+    let brief_path = base.join("brief.md");
+    std::fs::write(&brief_path, brief.as_bytes()).map_err(|e| format!("写指令失败：{e}"))?;
+
+    // 资料每次重拷：清掉旧的，保证 refs/ 跟当前任务的材料一致
+    let refs = base.join("refs");
+    if let Ok(rd) = std::fs::read_dir(&refs) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    for aid in asset_ids {
+        let rel: Option<String> = conn
+            .query_row("SELECT path FROM wb_files WHERE id=?1", params![aid], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(map_err)?
+            .flatten();
+        let rel = match rel {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => continue,
+        };
+        let src = abs_of(&dir, &rel);
+        if !src.exists() {
+            continue;
+        }
+        let name: String = conn
+            .query_row("SELECT name FROM wb_files WHERE id=?1", params![aid], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(map_err)?
+            .flatten()
+            .unwrap_or_else(|| "资料".into());
+        let dst = unique_path(&refs, &clean_path_name(&name), &ext_of(&name));
+        let _ = std::fs::copy(&src, &dst);
+    }
+
+    Ok(AiPrepOut {
+        dir: base.to_string_lossy().to_string(),
+        brief: brief_path.to_string_lossy().to_string(),
+    })
+}
+
+/// 在目录里找一个不重名的文件名：<stem>.<ext>，撞了就 -2、-3
+fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let ext = sanitize_ext(ext);
+    let mut p = dir.join(if ext.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{stem}.{ext}")
+    });
+    let mut n = 2;
+    while p.exists() {
+        p = dir.join(if ext.is_empty() {
+            format!("{stem}-{n}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        });
+        n += 1;
+    }
+    p
+}
+
+#[derive(Serialize)]
+pub struct AiImportedOut {
+    pub id: i64,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+}
+
+/// 扫 out/ 目录（含子目录、跳过隐藏文件），按路径排序
+fn out_files(work_dir: &str) -> Vec<std::path::PathBuf> {
+    let out_dir = std::path::Path::new(work_dir).join("out");
+    if !out_dir.exists() {
+        return Vec::new();
+    }
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![out_dir];
+    while let Some(d) = stack.pop() {
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if !p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with('.')
+                {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// 把**一个**文件收进资料库；失败（空文件、超大、写盘错）返回 None
+fn import_one_output(
+    conn: &Connection,
+    dir: &DataDir,
+    project_id: i64,
+    root: &std::path::Path,
+    p: &std::path::Path,
+) -> Option<AiImportedOut> {
+    let bytes = std::fs::read(p).ok()?;
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+    let name = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = sanitize_ext(&ext_of(&name));
+    let mime = guess_mime(&ext);
+    let raw_stem = std::path::Path::new(&name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "产出".to_string());
+    let stem = clean_path_name(&raw_stem);
+
+    conn.execute(
+        "INSERT INTO wb_files(project_id,name,ext,mime,size,path,sha256)
+         VALUES(?1,?2,?3,?4,?5,'','')",
+        params![project_id, name, ext, mime, bytes.len() as i64],
+    )
+    .ok()?;
+    let id = conn.last_insert_rowid();
+
+    let dst = unique_path(root, &stem, &ext);
+    if std::fs::write(&dst, &bytes).is_err() {
+        let _ = conn.execute("DELETE FROM wb_files WHERE id=?1", params![id]);
+        return None;
+    }
+    let rel = rel_to_root(dir, &dst);
+    conn.execute("UPDATE wb_files SET path=?1 WHERE id=?2", params![rel, id])
+        .ok()?;
+
+    Some(AiImportedOut {
+        id,
+        name,
+        mime,
+        size: bytes.len() as i64,
+    })
+}
+
+/// 把 out/ 里的产物收进资料库（跟手动上传走同一份存储），返回可直接挂上白板的信息
+#[tauri::command]
+pub fn ai_import_outputs(
+    db: State<Db>,
+    dir: State<DataDir>,
+    project_id: i64,
+    work_dir: String,
+) -> Result<Vec<AiImportedOut>, String> {
+    let files = out_files(&work_dir);
+    if files.is_empty() {
+        return Ok(vec![]);
+    }
+    let conn = db.0.lock().map_err(map_err)?;
+    let root = project_asset_dir(&conn, &dir, project_id);
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建资料目录失败：{e}"))?;
+
+    Ok(files
+        .iter()
+        .filter_map(|p| import_one_output(&conn, &dir, project_id, &root, p))
+        .collect())
+}
+
+/// 只导入 out/ 里的某一个文件（把产物从列表拖到白板时用，别把整轮产物都塞进资料库）
+#[tauri::command]
+pub fn ai_import_output(
+    db: State<Db>,
+    dir: State<DataDir>,
+    project_id: i64,
+    work_dir: String,
+    name: String,
+) -> Result<Option<AiImportedOut>, String> {
+    let hit = out_files(&work_dir)
+        .into_iter()
+        .find(|p| p.file_name().unwrap_or_default().to_string_lossy() == name);
+    let Some(src) = hit else {
+        return Ok(None);
+    };
+    let conn = db.0.lock().map_err(map_err)?;
+    let root = project_asset_dir(&conn, &dir, project_id);
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建资料目录失败：{e}"))?;
+    Ok(import_one_output(&conn, &dir, project_id, &root, &src))
+}
+
+/// 在资源管理器里打开文件夹（方便用户自己翻产物）
+#[tauri::command]
+pub fn ai_open_dir(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let p = std::path::Path::new(&path);
+        let target = if p.is_dir() { path } else { path };
+        std::process::Command::new("explorer")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("打开失败：{e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
     Ok(())
 }

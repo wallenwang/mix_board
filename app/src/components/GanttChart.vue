@@ -130,42 +130,164 @@ interface Row {
   pct: number;
   color: string;
   done: boolean;
+  /** 层级深度：根 0、下级 1……名称列按它缩进 */
+  level: number;
+  /** 有下级（下级里至少有一个画得出条）→ 行首显示展开小三角 */
+  hasKids: boolean;
+  open: boolean;
+  /** 有下级的行：条形是「自己 + 全部下级」起止的并集跨度，端点不可拖 */
+  group: boolean;
 }
 
 const today = new Date();
 today.setHours(0, 0, 0, 0);
 
-const rows = computed<Row[]>(() =>
-  props.tasks
-    .map((t) => {
-      const span = taskSpan(t);
-      if (!span) return null;
-      const from = new Date(span.from);
-      from.setHours(0, 0, 0, 0);
-      const to = new Date(span.to);
-      to.setHours(0, 0, 0, 0);
-      const days = Math.max(1, Math.round((to.getTime() - from.getTime()) / DAY) + 1);
-      const u = urgencyOf(t);
-      return {
-        task: t,
-        from,
-        to,
-        fromDay: Math.round((from.getTime() - today.getTime()) / DAY),
-        days,
-        pct: taskPercent(t),
-        // 手动指定的颜色优先（点条可改），没设过才按紧迫度自动配色
-        color: t.bar_color || URGENCY_COLOR[u],
-        done: !!t.completed_at,
-      };
-    })
-    .filter(Boolean) as Row[]
-);
+// ---------- 层级折叠：默认只看父任务，点小三角展开下级 ----------
+// 父条画的是「自己 + 全部下级」起止的**并集**（最早开始 → 最晚截止），
+// 不是天数相加 —— 比如 T5.1 做 3 天、T5.2 做 4 天但时间有重叠，
+// 父条只占真实跨过的那一段，跟两个子任务的实际起止对得上。
+const expanded = ref<Set<number>>(new Set()); // 空 = 全收起（默认状态）
 
-/** 时间轴范围：所有任务的最早开始到最晚截止，并包住今天 */
+function toggleOpen(id: number) {
+  const next = new Set(expanded.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expanded.value = next;
+}
+
+const taskById = computed(() => new Map(props.tasks.map((t) => [t.id, t])));
+
+/** 任务 id → 直接下级（按 props.tasks 原有顺序排） */
+const kidsOf = computed(() => {
+  const m = new Map<number, number[]>();
+  for (const t of props.tasks) {
+    const p = store.taskParentOf.get(t.id);
+    if (p == null || p === t.id || !taskById.value.has(p)) continue;
+    const arr = m.get(p);
+    if (arr) arr.push(t.id);
+    else m.set(p, [t.id]);
+  }
+  return m;
+});
+
+/** 自己 + 全部下级（环保护，遇环不死循环） */
+function subtreeIds(id: number): number[] {
+  const out = [id];
+  const seen = new Set<number>([id]);
+  const queue = [id];
+  while (queue.length) {
+    const cur = queue.shift() as number;
+    for (const k of kidsOf.value.get(cur) ?? []) {
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+      queue.push(k);
+    }
+  }
+  return out;
+}
+
+/** 自己 + 全部下级里画得出来的日期区间并集；全都没日期就返回 null（不进甘特图） */
+function unionSpan(id: number): { from: Date; to: Date } | null {
+  let from: Date | null = null;
+  let to: Date | null = null;
+  for (const sid of subtreeIds(id)) {
+    const t = taskById.value.get(sid);
+    const span = t ? taskSpan(t) : null;
+    if (!span) continue;
+    if (!from || span.from < from) from = span.from;
+    if (!to || span.to > to) to = span.to;
+  }
+  return from && to ? { from, to } : null;
+}
+
+function buildRow(t: Task, level: number): Row | null {
+  const span = unionSpan(t.id);
+  if (!span) return null;
+  const from = new Date(span.from);
+  from.setHours(0, 0, 0, 0);
+  const to = new Date(span.to);
+  to.setHours(0, 0, 0, 0);
+  const days = Math.max(1, Math.round((to.getTime() - from.getTime()) / DAY) + 1);
+  const group = (kidsOf.value.get(t.id) ?? []).some((k) => unionSpan(k) != null);
+  const sub = subtreeIds(t.id);
+  const allDone = sub.every((id) => !!taskById.value.get(id)?.completed_at);
+  // 有下级的条：进度 = 整棵子树的平均进度；颜色按并集终点的紧迫度走（手动配色仍最优先）
+  const pct = group
+    ? Math.round(
+        sub.reduce((n, id) => n + taskPercent(taskById.value.get(id) as Task), 0) / sub.length
+      )
+    : taskPercent(t);
+  const iso = `${to.getFullYear()}-${String(to.getMonth() + 1).padStart(2, "0")}-${String(
+    to.getDate()
+  ).padStart(2, "0")}`;
+  const color =
+    t.bar_color ||
+    URGENCY_COLOR[
+      group
+        ? allDone
+          ? "done"
+          : urgencyOf({ due_date: iso, completed_at: null })
+        : urgencyOf(t)
+    ];
+  return {
+    task: t,
+    from,
+    to,
+    fromDay: Math.round((from.getTime() - today.getTime()) / DAY),
+    days,
+    pct,
+    color,
+    done: allDone,
+    level,
+    hasKids: group,
+    open: expanded.value.has(t.id),
+    group,
+  };
+}
+
+/** 全部行（含收起的）——时间轴范围要按它算，收起时时间轴不会跟着缩短 */
+const flatRows = computed<Row[]>(() => {
+  const flat: Row[] = [];
+  const seen = new Set<number>();
+  const walk = (t: Task, level: number) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    const row = buildRow(t, level);
+    if (!row) return; // 整棵子树都没有日期：整棵都不进甘特图
+    flat.push(row);
+    for (const k of kidsOf.value.get(t.id) ?? []) {
+      const kt = taskById.value.get(k);
+      if (kt) walk(kt, level + 1);
+    }
+  };
+  // 根 = 没挂到别的任务下面的那些，保持原有先后顺序
+  for (const t of props.tasks) {
+    const p = store.taskParentOf.get(t.id);
+    if (p != null && taskById.value.has(p)) continue;
+    walk(t, 0);
+  }
+  return flat;
+});
+
+/** 当前看得见的行：下级只有在父级链上每一层都展开时才出现 */
+const rows = computed<Row[]>(() => {
+  const openIds = new Set(flatRows.value.filter((r) => r.open).map((r) => r.task.id));
+  return flatRows.value.filter((r) => {
+    let p = store.taskParentOf.get(r.task.id);
+    while (p != null && taskById.value.has(p)) {
+      if (!openIds.has(p)) return false;
+      p = store.taskParentOf.get(p);
+    }
+    return true;
+  });
+});
+
+/** 时间轴范围：所有任务（含收起的）最早开始到最晚截止，并包住今天 */
 const range = computed(() => {
   let min = 0;
   let max = 0;
-  for (const r of rows.value) {
+  for (const r of flatRows.value) {
     min = Math.min(min, r.fromDay);
     max = Math.max(max, r.fromDay + r.days - 1);
   }
@@ -200,25 +322,34 @@ const barStyle = (r: Row) => ({
   background: r.color,
 });
 
-// ---------- 拖条两端改日期 ----------
+// ---------- 拖条改日期 ----------
+// 叶子任务的条：拖两端改开始/截止。
+// 有下级的条（并集跨度）：端点是算出来的、不能拖；拖整条 = 整棵子树的日期一起平移。
 
-type Drag = {
-  row: Row;
-  edge: "l" | "r";
-  startX: number;
-  from: Date;
-  to: Date;
-  preview: { from: Date; to: Date };
-};
+type Drag =
+  | {
+      mode: "edge";
+      row: Row;
+      edge: "l" | "r";
+      startX: number;
+      from: Date;
+      to: Date;
+      preview: { from: Date; to: Date };
+    }
+  | { mode: "shift"; row: Row; startX: number; delta: number };
 
 const drag = ref<Drag | null>(null);
+/** 拖过之后的那一下 click 别再弹配色板（浏览器会在拖完后照常派发 click） */
+let movedSinceDown = false;
 
 function onBarDown(r: Row, edge: "l" | "r", e: PointerEvent) {
   if (props.compact) return;
   if (e.button !== 0) return; // 中键留给画布平移，别改到日期
   e.preventDefault();
   e.stopPropagation();
+  movedSinceDown = false;
   drag.value = {
+    mode: "edge",
     row: r,
     edge,
     startX: e.clientX,
@@ -228,11 +359,28 @@ function onBarDown(r: Row, edge: "l" | "r", e: PointerEvent) {
   };
 }
 
+/** 有下级的条：按住整条拖 = 整组平移（自己和所有下级的起止一起挪同样多的天数） */
+function onGroupDown(r: Row, e: PointerEvent) {
+  if (props.compact) return;
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  movedSinceDown = false;
+  drag.value = { mode: "shift", row: r, startX: e.clientX, delta: 0 };
+}
+
 function onMove(e: PointerEvent) {
   const d = drag.value;
   if (!d) return;
   const delta = Math.round((e.clientX - d.startX) / dayW.value);
+  if (d.mode === "shift") {
+    if (delta === d.delta) return;
+    movedSinceDown = true;
+    drag.value = { ...d, delta };
+    return;
+  }
   if (delta === 0) return;
+  movedSinceDown = true;
   let from = new Date(d.from);
   let to = new Date(d.to);
   if (d.edge === "r") {
@@ -243,42 +391,79 @@ function onMove(e: PointerEvent) {
   drag.value = { ...d, preview: { from, to } };
 }
 
+const fmtDate = (x: Date) =>
+  `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+
+/** 整棵子树平移 N 天：有开始/截止的都挪，没填的不动 */
+async function shiftSubtree(r: Row, deltaDays: number) {
+  for (const id of subtreeIds(r.task.id)) {
+    const t = taskById.value.get(id);
+    if (!t) continue;
+    const patch: { start_date?: string; due_date?: string } = {};
+    const s = parseDate(t.start_date);
+    const due = parseDate(t.due_date);
+    if (s) patch.start_date = fmtDate(new Date(s.getTime() + deltaDays * DAY));
+    if (due) patch.due_date = fmtDate(new Date(due.getTime() + deltaDays * DAY));
+    if (Object.keys(patch).length) await store.setDates(id, patch);
+  }
+}
+
 async function onUp() {
   const d = drag.value;
   drag.value = null;
   if (!d) return;
-  const fmt = (x: Date) =>
-    `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-  const patch: { start_date?: string; due_date?: string } = {};
-  if (d.edge === "l" && fmt(d.preview.from) !== fmt(d.from)) {
-    patch.start_date = fmt(d.preview.from);
+  if (d.mode === "shift") {
+    if (d.delta) await shiftSubtree(d.row, d.delta);
+  } else {
+    const patch: { start_date?: string; due_date?: string } = {};
+    if (d.edge === "l" && fmtDate(d.preview.from) !== fmtDate(d.from)) {
+      patch.start_date = fmtDate(d.preview.from);
+    }
+    if (d.edge === "r" && fmtDate(d.preview.to) !== fmtDate(d.to)) {
+      patch.due_date = fmtDate(d.preview.to);
+    }
+    if (Object.keys(patch).length) await store.setDates(d.row.task.id, patch);
   }
-  if (d.edge === "r" && fmt(d.preview.to) !== fmt(d.to)) {
-    patch.due_date = fmt(d.preview.to);
-  }
-  if (!Object.keys(patch).length) return;
-  await store.setDates(d.row.task.id, patch);
+  // 拖完松手浏览器还会补发一下 click，别让它弹配色板；过几百毫秒自动解锁
+  window.setTimeout(() => (movedSinceDown = false), 400);
 }
 
 /** 拖动中的临时位置（盖在真实值上，松手才落库） */
 function liveStyle(r: Row) {
   const d = drag.value;
   if (!d || d.row.task.id !== r.task.id) return barStyle(r);
-  const fmt = (x: Date) =>
-    `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+  if (d.mode === "shift") {
+    return {
+      left: `${(r.fromDay - range.value.min + d.delta) * dayW.value}px`,
+      width: `${Math.max(10, r.days * dayW.value - 3)}px`,
+      background: r.color,
+      opacity: d.delta ? 0.75 : 1,
+    };
+  }
   const from = d.edge === "l" ? d.preview.from : d.from;
   const to = d.edge === "r" ? d.preview.to : d.to;
   const fromDay = Math.round((from.getTime() - today.getTime()) / DAY);
   const days = Math.max(1, Math.round((to.getTime() - from.getTime()) / DAY) + 1);
   const changed =
-    (d.edge === "l" && fmt(d.preview.from) !== fmt(d.from)) ||
-    (d.edge === "r" && fmt(d.preview.to) !== fmt(d.to));
+    (d.edge === "l" && fmtDate(d.preview.from) !== fmtDate(d.from)) ||
+    (d.edge === "r" && fmtDate(d.preview.to) !== fmtDate(d.to));
   return {
     left: `${(fromDay - range.value.min) * dayW.value}px`,
     width: `${Math.max(10, days * dayW.value - 3)}px`,
     background: r.color,
     opacity: changed ? 0.75 : 1,
   };
+}
+
+/** 条上的提示文案：父条说明它是并集跨度、能整组平移 */
+function barTitle(r: Row) {
+  const span = `${r.from.getMonth() + 1}/${r.from.getDate()} – ${r.to.getMonth() + 1}/${r.to.getDate()}（${r.days} 天）`;
+  const state = r.done ? "已完成" : r.pct + "%";
+  if (r.group) {
+    const n = subtreeIds(r.task.id).length - 1;
+    return `${r.task.title} · ${n} 个下级合并 ${span} — ${state} ｜ 拖动整组平移，点一下换颜色`;
+  }
+  return `${r.task.title} ${span} — ${state} ｜ 点一下换颜色`;
 }
 
 onMounted(() => {
@@ -316,7 +501,10 @@ const palPos = ref({ x: 0, y: 0 });
 
 /** 点条：弹配色小面板（条的正上方）；白板里的紧凑版仍直接开详情 */
 function openPalette(r: Row, e: MouseEvent) {
-  if (drag.value) return;
+  if (drag.value || movedSinceDown) {
+    movedSinceDown = false;
+    return;
+  }
   if (props.compact) {
     openTask(r.task);
     return;
@@ -350,7 +538,7 @@ const nameW = computed(() => (props.compact ? 96 : 170));
 <template>
   <div class="gantt" :class="{ compact }">
     <div class="g-tools" v-if="!compact">
-      <span class="g-count">{{ rows.length }} 个任务</span>
+      <span class="g-count">{{ flatRows.length }} 个任务</span>
       <div class="g-zoom">
         <button
           v-for="z in zooms"
@@ -363,7 +551,7 @@ const nameW = computed(() => (props.compact ? 96 : 170));
         </button>
       </div>
       <span class="g-scale" :title="`当前缩放：一天 ${dayW} px`">{{ dayW }}px/天</span>
-      <span class="g-tip">点条换颜色 · 拖条两端改日期 · 滚轮缩放时间轴 · 中键拖动平移</span>
+      <span class="g-tip">点▸展开下级 · 拖父条整组平移 · 拖条两端改日期 · 点条换颜色 · 滚轮缩放 · 中键平移</span>
     </div>
 
     <div v-if="!rows.length" class="g-empty">
@@ -402,6 +590,21 @@ const nameW = computed(() => (props.compact ? 96 : 170));
           :style="{ '--name-w': nameW + 'px' }"
         >
           <div class="g-name" :title="r.task.title" @click="openTask(r.task)">
+            <span class="g-indent" :style="{ width: r.level * 14 + 'px' }"></span>
+            <button
+              v-if="r.hasKids"
+              class="g-twist"
+              :class="{ open: r.open }"
+              :title="r.open ? '收起下级' : '展开下级'"
+              @pointerdown.stop
+              @click.stop="toggleOpen(r.task.id)"
+            >
+              ▸
+            </button>
+            <span v-else class="g-twist-space"></span>
+            <span v-if="!compact && store.numberOf(r.task.id)" class="g-no">{{
+              "T" + store.numberOf(r.task.id)
+            }}</span>
             <span class="g-dot" :style="{ background: r.color }"></span>
             {{ r.task.title }}
           </div>
@@ -414,20 +617,23 @@ const nameW = computed(() => (props.compact ? 96 : 170));
             ></div>
             <div
               class="g-bar"
-              :class="{ hasFill: r.pct > 0 && r.pct < 100 }"
+              :class="{ hasFill: r.pct > 0 && r.pct < 100, group: r.group }"
               :style="liveStyle(r)"
-              :title="`${r.task.title}（${r.done ? '已完成' : r.pct + '%'}）— 点一下换颜色`"
+              :title="barTitle(r)"
               @click="openPalette(r, $event)"
+              @pointerdown="r.group ? onGroupDown(r, $event) : undefined"
             >
               <span class="g-fill" :style="{ width: `${r.pct}%` }"></span>
-              <span
-                class="g-handle l"
-                @pointerdown="onBarDown(r, 'l', $event)"
-              ></span>
-              <span
-                class="g-handle r"
-                @pointerdown="onBarDown(r, 'r', $event)"
-              ></span>
+              <template v-if="!r.group">
+                <span
+                  class="g-handle l"
+                  @pointerdown="onBarDown(r, 'l', $event)"
+                ></span>
+                <span
+                  class="g-handle r"
+                  @pointerdown="onBarDown(r, 'r', $event)"
+                ></span>
+              </template>
             </div>
             <div
               class="g-today"
@@ -595,6 +801,45 @@ const nameW = computed(() => (props.compact ? 96 : 170));
   border-radius: 50%;
   flex: none;
 }
+/* 层级：缩进 + 展开小三角（有下级才有三角，收起 ▸ / 展开 ▾） */
+.g-indent {
+  flex: none;
+}
+.g-twist {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-out, ease);
+}
+.g-twist:hover {
+  background: var(--bg-sunken, rgba(127, 127, 127, 0.12));
+  color: var(--text);
+}
+.g-twist.open {
+  transform: rotate(90deg);
+}
+.g-twist-space {
+  flex: none;
+  width: 15px;
+}
+/* 任务编号（T5.1）：跟看板卡片同一套写法，跟 AI 交代时直接说这个号 */
+.g-no {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--text-subtle);
+  background: var(--bg-sunken, rgba(127, 127, 127, 0.1));
+  border-radius: 4px;
+  padding: 0 4px;
+}
 .g-timeline {
   position: relative;
   height: 28px;
@@ -647,6 +892,14 @@ const nameW = computed(() => (props.compact ? 96 : 170));
 }
 .g-bar:hover {
   filter: brightness(1.08);
+}
+/* 有下级的合并条：描边 + 抓手光标，跟普通条区分开 */
+.g-bar.group {
+  cursor: grab;
+  border: 1px dashed rgba(255, 255, 255, 0.55);
+}
+.g-bar.group:active {
+  cursor: grabbing;
 }
 /* 条内深色填充 = 进度百分比 */
 .g-fill {

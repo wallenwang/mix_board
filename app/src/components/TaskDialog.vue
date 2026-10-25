@@ -67,7 +67,8 @@ const relations = computed(() => {
   if (!t) return null;
   const titleOf = (id: number) => store.allTasks.find((x) => x.id === id)?.title ?? "（已删除）";
   const num = store.numberOf(t.id);
-  const parent = store.taskParentOf.get(t.id);
+  // 多父：一张卡可以同时挂在几个上级下面（每个上级单独运行、互不依赖），详情里全部列出来
+  const parents = store.taskParentsOf.get(t.id) ?? [];
   const kids = store.edges
     .filter((e) => e.kind === "decompose" && e.from_kind === "task" && e.to_kind === "task" && e.to_id === t.id)
     .map((e) => e.from_id);
@@ -83,7 +84,7 @@ const relations = computed(() => {
     point: r.point,
   }));
   const fmt = DELIVER_OPTIONS.find((o) => o.key === (t.deliver_fmt || "").toLowerCase());
-  return { num, parent, kids, prev, next, refs, fmt };
+  return { num, parents, kids, prev, next, refs, fmt };
 });
 
 /** 编辑时就能看到这张卡会是什么颜色、还剩几天 */
@@ -177,9 +178,13 @@ async function createTag() {
             <span v-else class="rel-empty">未指定交付格式</span>
           </span>
         </div>
-        <div v-if="relations.parent" class="rel-row">
+        <div v-if="relations.parents.length" class="rel-row">
           <span class="rel-k">所属任务</span>
-          <span class="rel-v">T{{ store.numberOf(relations.parent) }} {{ titleOf2(relations.parent) }}</span>
+          <span class="rel-v">
+            <span v-for="k in relations.parents" :key="k" class="rel-chip"
+              >T{{ store.numberOf(k) }} {{ titleOf2(k) }}</span
+            >
+          </span>
         </div>
         <div v-if="relations.kids.length" class="rel-row">
           <span class="rel-k">下级任务</span>

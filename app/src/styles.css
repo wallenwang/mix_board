@@ -1,3 +1,11 @@
+/* 「给 AI 的指令」弹窗：内容再长也不顶满屏幕，主体自己滚、footer 永远可见。
+   ⚠️ 这条必须放全局：el-dialog 是 teleport 到 body 的，组件里的 scoped
+   `:deep(.el-dialog__body)` 命中不了，实测 max-height 一直是 none。 */
+.ai-dialog .el-dialog__body {
+  max-height: 66vh;
+  overflow: auto;
+}
+
 /* ============================================================================
  * 工作看板 · 设计系统 v2
  *
@@ -57,7 +65,8 @@
   --edge-parent: #a4b0c2;
   --edge-order: #cf8a28;
   --edge-source: #2f9e6a;
-  --edge-output: #7a5cc4;
+  /* 产物：绿色。比「依据」的中绿深一档，旁边放一起也不会认错 */
+  --edge-output: #1f8f5f;
 
   /* 图标色：同一种功能固定一个色，工具栏不再是一排灰线 */
   --ic-kanban: #3b7ddd;
@@ -151,7 +160,7 @@ html.dark {
   --edge-parent: #8b98ac;
   --edge-order: #e2b263;
   --edge-source: #5cc3a2;
-  --edge-output: #b39aec;
+  --edge-output: #43c08a;
 
   --ic-kanban: #7fa6ff;
   --ic-board: #b39aec;
@@ -254,6 +263,9 @@ html.dark {
   padding: 18px 20px !important;
 }
 .el-message-box {
+  /* Element 原本是 width:100% + max-width:420px；之前只放宽 max-width 会把确认框
+     拉成整屏宽（实测 1667px），按钮被甩到屏幕另一头。显式给定宽，保持紧凑。 */
+  width: min(380px, calc(100vw - 40px));
   max-width: calc(100vw - 40px);
   border-radius: var(--radius-lg) !important;
   box-shadow: var(--shadow-lg) !important;

@@ -36,6 +36,8 @@ export interface PromptStore {
   edges: BoardEdge[];
   refsOfTask(taskId: number): TaskRef[];
   numberOf(taskId: number): string;
+  /** 多父：一个子任务可以同时挂在几个上级下面（key = 子，value = 全部上级） */
+  taskParentsOf: Map<number, number[]>;
 }
 
 /* ---------------- 弹窗状态：任何地方调 openPrompt 都能打开 ---------------- */
@@ -225,7 +227,9 @@ function collectLinks(store: PromptStore, taskId: number) {
   /** 连线两端各自指向哪个任务：from 是上级/前置/产出方，to 是下级/后续 */
   const atFrom = (e: BoardEdge) => store.allTasks.find((t) => t.id === e.from_id);
   const atTo = (e: BoardEdge) => store.allTasks.find((t) => t.id === e.to_id);
-  let parentRow: Neighbor | null = null;
+  /** 多父：同一个子任务可以同时服务多个上级，每个上级单独运行时都该看到它 */
+  const parents: Neighbor[] = [];
+  const parentIds = new Set<number>();
   const children: Neighbor[] = [];
   const prev: Neighbor[] = [];
   const next: Neighbor[] = [];
@@ -237,16 +241,20 @@ function collectLinks(store: PromptStore, taskId: number) {
     // 这个任务交出来的东西：produce 边指向的节点
     const outs: string[] = [];
     for (const e of store.edges) {
-      if (
-        e.kind === "produce" &&
-        e.from_kind === "task" &&
-        e.from_id === t.id &&
-        e.to_kind === "note"
-      ) {
-        const n = store.notes.find((x) => x.id === e.to_id);
-        const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
-        if (n) outs.push((n.text || f?.name || "产出").trim());
-      }
+      if (e.kind !== "produce") continue;
+      // ⚠️ 产物边的方向是「产物 → 任务」（箭头指向任务）。
+      // 早期数据里还有「任务 → 产物」的写法，两种都认 —— 只认一种的话，
+      // 这一段产物永远读不出来（白板上的线明明在，指令里却是空的）。
+      const nid =
+        e.from_kind === "task" && e.from_id === t.id && e.to_kind === "note"
+          ? e.to_id
+          : e.to_kind === "task" && e.to_id === t.id && e.from_kind === "note"
+            ? e.from_id
+            : null;
+      if (nid == null) continue;
+      const n = store.notes.find((x) => x.id === nid);
+      const f = n?.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+      if (n) outs.push((n.text || f?.name || "产出").trim());
     }
     return {
       seq: store.numberOf(t.id),
@@ -272,7 +280,12 @@ function collectLinks(store: PromptStore, taskId: number) {
     // 所属任务：我 → 别人（分解边方向是子 → 父，所以我指向的是上级）
     if (kind === "decompose" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "task") {
       const t = atTo(e);
-      if (t) parentRow = asNeighbor(t);
+      // ⚠️ 多父：以前这里是 `parentRow = asNeighbor(t)` —— 单个变量，后一条父边直接把前一条顶掉，
+      // 于是白板上明明挂着两个上级，AI 指令里只写了一个。全部收进来。
+      if (t && !parentIds.has(t.id)) {
+        parentIds.add(t.id);
+        parents.push(asNeighbor(t));
+      }
     }
     // 下级任务：别人 → 我（它们是子级，指向本任务）
     if (kind === "decompose" && e.to_kind === "task" && e.to_id === taskId && e.from_kind === "task") {
@@ -289,17 +302,25 @@ function collectLinks(store: PromptStore, taskId: number) {
       const t = atTo(e);
       if (t) next.push(asNeighbor(t));
     }
-    // 产出：我 → 文档 / 资料节点
-    if (kind === "produce" && e.from_kind === "task" && e.from_id === taskId && e.to_kind === "note") {
-      const n = store.notes.find((x) => x.id === e.to_id);
-      if (n) {
-        const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
-        outputs.push((n.text || f?.name || "产出").trim());
+    // 产物：产物 → 我（也兼容早期的「我 → 产物」）
+    if (kind === "produce") {
+      const nid =
+        e.from_kind === "task" && e.from_id === taskId && e.to_kind === "note"
+          ? e.to_id
+          : e.to_kind === "task" && e.to_id === taskId && e.from_kind === "note"
+            ? e.from_id
+            : null;
+      if (nid != null) {
+        const n = store.notes.find((x) => x.id === nid);
+        if (n) {
+          const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
+          outputs.push((n.text || f?.name || "产出").trim());
+        }
       }
     }
     // 白板节点 → 我：思维导图、便签、文字等，都是本任务要用到的参数。
     // file 节点跳过 —— 那些是资料，已经在「参考材料」里，不重复列。
-    if (e.to_kind === "task" && e.to_id === taskId && e.from_kind === "note") {
+    if (e.to_kind === "task" && e.to_id === taskId && e.from_kind === "note" && kind !== "produce") {
       const n = store.notes.find((x) => x.id === e.from_id);
       if (n && n.kind !== "box" && n.kind !== "gantt" && n.kind !== "file") {
         const f = n.file_id ? store.assets.find((a) => a.id === n.file_id) : null;
@@ -327,7 +348,7 @@ function collectLinks(store: PromptStore, taskId: number) {
       }
     }
   }
-  return { parent: parentRow, children, prev, next, outputs, boardLinks };
+  return { parents, children, prev, next, outputs, boardLinks };
 }
 
 /* ---------------- 组装 ---------------- */
@@ -484,9 +505,20 @@ export function buildTaskPrompt(store: PromptStore, taskId: number): string {
   /* 三、任务关系 */
   const links = collectLinks(store, taskId);
   const posLines: string[] = [];
-  if (links.parent) {
-    posLines.push(`- 所属任务：T${links.parent.seq} ${links.parent.title}`);
+  if (links.parents.length === 1) {
+    const p = links.parents[0];
+    posLines.push(`- 所属任务：T${p.seq} ${p.title}`);
     posLines.push("  （本任务是它的一部分，完成后作为它的组成部分交付）");
+  } else if (links.parents.length > 1) {
+    // 多父：这个子任务的成果同时被几个上级用到。每个上级单独运行、互不依赖，
+    // 所以必须把全部上级写清楚，否则 AI 会以为只需要照顾其中一个。
+    posLines.push(
+      `- 所属任务（${links.parents.length} 个上级共用本任务的成果）：` +
+        links.parents.map((p) => `T${p.seq} ${p.title}`).join("、")
+    );
+    posLines.push(
+      "  （本任务同时是这几个上级的一部分，交付要能同时支撑它们，别偏向其中任何一个）"
+    );
   }
   for (const p of links.prev) {
     posLines.push(

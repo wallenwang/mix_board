@@ -6,11 +6,16 @@ import type {
   Tag,
   TrashItem,
   BoardNote,
+  NoteTrashItem,
   BoardEdge,
   EdgeKind,
   TaskRef,
   WbFile,
   Doc,
+  AiBackend,
+  AiModel,
+  AiOutput,
+  AiImported,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -159,6 +164,13 @@ const real = {
   ) => invoke<void>("update_note", { id, patch }),
   deleteNote: (id: number) => invoke<void>("delete_note", { id }),
 
+  // 白板卡片的回收站（删除 = 软删除，30/60 天后自动清理）
+  listDeletedNotes: () => invoke<NoteTrashItem[]>("list_deleted_notes"),
+  restoreNote: (id: number) => invoke<void>("restore_note", { id }),
+  purgeNote: (id: number) => invoke<void>("purge_note", { id }),
+  /** days<=0 = 永不清理 */
+  purgeExpiredNotes: (days: number) => invoke<number>("purge_expired_notes", { days }),
+
   // whiteboard edges (connections between nodes)
   listEdges: (projectId: number) => invoke<BoardEdge[]>("list_edges", { projectId }),
   createEdge: (
@@ -244,6 +256,44 @@ const real = {
   createTag: (projectId: number, name: string, color?: string) =>
     invoke<number>("create_tag", { projectId, name, color }),
   deleteTag: (id: number) => invoke<void>("delete_tag", { id }),
+
+  // 把任务交给本地 AI 命令行（ACP 协议，见 src-tauri/src/agent.rs）
+  aiDetectBackends: () => invoke<AiBackend[]>("ai_detect_backends"),
+  aiListModels: (exe: string, args: string[]) =>
+    invoke<AiModel[]>("ai_list_models", { exe, args }),
+  aiStart: (req: {
+    // ⚠️ 这里刻意用 snake_case：嵌套结构体由 serde 按字段名取值，
+    //    写 runId 会被 #[serde(default)] 默默吞成空串，前端就拿不到自己的 run_id。
+    run_id: string;
+    exe: string;
+    args: string[];
+    cwd: string;
+    prompt: string;
+    model: string;
+    title: string;
+  }) => invoke<string>("ai_start", { req }),
+  /** 轮询用：事件订阅不上（缺 core:event 权限）时的备份通道 */
+  aiStatus: (runId: string) =>
+    invoke<{ phase: string; text: string; error: string }>("ai_status", { runId }),
+  aiCancel: (runId: string) => invoke<void>("ai_cancel", { runId }),
+  aiCollectOutputs: (dir: string) => invoke<AiOutput[]>("ai_collect_outputs", { dir }),
+  /** 建工作目录 + 写 brief.md + 拷资料进 refs/ */
+  aiPrepare: (
+    projectId: number,
+    title: string,
+    brief: string,
+    assetIds: number[]
+  ) => invoke<{ dir: string; brief: string }>("ai_prepare", { projectId, title, brief, assetIds }),
+  /** 把 out/ 里的产物收进资料库，返回可直接挂上白板的信息 */
+  aiImportOutputs: (projectId: number, workDir: string) =>
+    invoke<AiImported[]>("ai_import_outputs", { projectId, workDir }),
+  /** 只导入 out/ 里的某一个文件（把产物从列表拖到白板时用） */
+  aiImportOutput: (projectId: number, workDir: string, name: string) =>
+    invoke<AiImported | null>("ai_import_output", { projectId, workDir, name }),
+  aiOpenDir: (path: string) => invoke<void>("ai_open_dir", { path }),
+  /** 把 AI 的回复存成 out/AI 回复.md（模型只回文字不肯写文件时兜底） */
+  aiSaveReply: (workDir: string, text: string) =>
+    invoke<string>("ai_save_reply", { workDir, text }),
 
   // settings
   getSettings: () => invoke<{ theme: string }>("get_settings"),

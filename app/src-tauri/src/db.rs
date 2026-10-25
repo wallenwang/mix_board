@@ -199,6 +199,9 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     // 与特殊分组的类型（candidates 候选组 / versions 版本组）。留空即普通分组。
     add_note_col("role", "role TEXT NOT NULL DEFAULT ''")?;
     add_note_col("group_kind", "group_kind TEXT NOT NULL DEFAULT ''")?;
+    // Migration: 删除改成「进回收站」而不是直接抹掉。
+    // 有值 = 在回收站里（时间戳），NULL = 正常卡片。到期由 purge_expired_notes 清。
+    add_note_col("deleted_at", "deleted_at TEXT")?;
 
     // Migration: 连线的语义类型。老数据全部落在 decompose（分解）上，
     // 也就是升级前后的观感一致，不会突然冒出一堆看不懂的线型。

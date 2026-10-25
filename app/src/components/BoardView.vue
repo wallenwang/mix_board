@@ -33,6 +33,45 @@ function onWheel(e: WheelEvent) {
   setZoom(zoom.value + step);
 }
 
+// ---- 中键拖动平移：跟白板 / 甘特图同一套手感（左键留给卡片拖拽）----
+// 横向滚 .board；纵向滚指针所在的那一列 column-body —— 拖一下两个方向一起走。
+const panning = ref(false);
+let panStart: { x: number; y: number; sl: number; st: number; body: HTMLElement | null } | null =
+  null;
+
+function onBoardDown(e: PointerEvent) {
+  if (e.button !== 1) return;
+  e.preventDefault();
+  const board = boardRef.value;
+  if (!board) return;
+  const body = (e.target as HTMLElement | null)?.closest(".column-body") ?? null;
+  panning.value = true;
+  panStart = {
+    x: e.clientX,
+    y: e.clientY,
+    sl: board.scrollLeft,
+    st: body ? body.scrollTop : 0,
+    body,
+  };
+  window.addEventListener("pointermove", onBoardPan);
+  window.addEventListener("pointerup", onBoardPanEnd);
+}
+
+function onBoardPan(e: PointerEvent) {
+  const board = boardRef.value;
+  if (!panStart || !board) return;
+  e.preventDefault();
+  board.scrollLeft = panStart.sl - (e.clientX - panStart.x);
+  if (panStart.body) panStart.body.scrollTop = panStart.st - (e.clientY - panStart.y);
+}
+
+function onBoardPanEnd() {
+  panning.value = false;
+  panStart = null;
+  window.removeEventListener("pointermove", onBoardPan);
+  window.removeEventListener("pointerup", onBoardPanEnd);
+}
+
 /** 看板窄到每列不足 ~175px 时切成紧凑样式，保证一屏能看全 */
 const compact = ref(false);
 /** 再窄（每列不足 ~118px，比如全景布局里）切「超紧凑」：只留标题，其余元素收起 */
@@ -122,8 +161,11 @@ async function addColumn() {
     <div
       ref="viewportRef"
       class="board-viewport"
-      title="Ctrl + 滚轮缩放，普通滚轮横向滚动"
+      :class="{ panning }"
+      title="Ctrl + 滚轮缩放，普通滚轮横向滚动，按住鼠标中键拖动平移"
       @wheel="onWheel"
+      @pointerdown="onBoardDown"
+      @auxclick.prevent
     >
     <div ref="boardRef" class="board" :class="{ compact, ultra }" :style="{ zoom: String(zoom) }">
       <VueDraggable
@@ -172,6 +214,12 @@ async function addColumn() {
   min-height: 0;
   min-width: 0;
   display: flex;
+}
+/* 中键拖动平移中：抓手光标 + 禁文字选择，跟白板/甘特图一致 */
+.board-viewport.panning,
+.board-viewport.panning * {
+  cursor: grabbing;
+  user-select: none;
 }
 .board-zoom {
   position: absolute;

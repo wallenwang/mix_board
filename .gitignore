@@ -29,6 +29,17 @@ diag.log
 *.db-wal
 *.db-shm
 
+# ---- 本机一次性开发脚本（写死了本地绝对路径，不进仓库）----
+app/scripts/patch_*.py
+app/scripts/import_demo.py
+app/scripts/make_glaze_png.py
+app/scripts/check-*.mjs
+app/scripts/acp-*.mjs
+app/scripts/dump-seed.mjs
+app/scripts/make-assets.mjs
+app/scripts/shot-assets.mjs
+app/scripts/shot-routing.mjs
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/

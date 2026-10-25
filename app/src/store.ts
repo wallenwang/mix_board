@@ -1,9 +1,11 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { ElMessage } from "element-plus";
 import { api } from "./api";
 import { daysLeft } from "./due";
 import { computeTaskNumbers } from "./numbering";
 import { reportError } from "./diag";
+import { ensureDemoProject } from "./demoSeed";
 import type {
   Project,
   Column,
@@ -106,12 +108,26 @@ export const useBoardStore = defineStore("board", () => {
     currentProjectId.value = data.current_project_id ?? data.projects[0]?.id ?? null;
     if (currentProjectId.value != null) await loadProject(currentProjectId.value);
     loaded.value = true;
+
+    // 第一次打开桌面版：把演示项目建出来（浏览器预览由 mock 自带，这里直接跳过）。
+    // 建完直接切过去，用户一打开就能看到一份有内容的项目，而不是空看板。
+    try {
+      const demoId = await ensureDemoProject();
+      if (demoId != null) {
+        projects.value = await api.listProjects();
+        await loadProject(demoId);
+      }
+    } catch (e) {
+      reportError("初始化演示项目", e);
+    }
   }
 
   async function loadProject(id: number) {
+    // 先点亮侧栏再等后端开库：开库 + 读数据要几百毫秒，
+    // 这段时间界面完全没动静，用户会以为「点了没反应」（这次报的问题）。
+    currentProjectId.value = id;
     // 一个项目一份库：先让后端把这个项目的库打开，再读数据
     await api.openProjectDb(id);
-    currentProjectId.value = id;
     const [cols, tsk, tg, nts, eds, refs, fls, dcs] = await Promise.all([
       api.listColumns(id),
       api.listTasks(id),
@@ -286,8 +302,22 @@ export const useBoardStore = defineStore("board", () => {
   }
 
   async function switchProject(id: number) {
-    if (id === currentProjectId.value) return;
-    await loadProject(id);
+    if (id === currentProjectId.value) {
+      // 点的是当前项目：给一句话，不然用户会以为「点了没反应」
+      ElMessage.info("已经在这个项目里了");
+      return;
+    }
+    const prev = currentProjectId.value;
+    try {
+      await loadProject(id);
+    } catch (e) {
+      // 切库失败原先会被 Promise 吞掉（界面一动不动、控制台也不响），
+      // 现在回滚高亮并把原因说出来
+      currentProjectId.value = prev;
+      reportError("切换项目", e);
+      const msg = String((e as Error)?.message ?? e);
+      ElMessage.error(`打开项目失败：${msg.slice(0, 80)}`);
+    }
   }
 
   /** 拖分割条时实时改；松手时落库 */
@@ -297,32 +327,74 @@ export const useBoardStore = defineStore("board", () => {
     if (persist) api.setSetting("split_ratio", String(clamped)).catch(() => {});
   }
 
-  /** task → task 的父子关系（来自白板连线：from = 子，to = 父） */
-  const taskParentOf = computed(() => {
-    const m = new Map<number, number>();
+  /**
+   * task → task 的全部父子关系（来自白板连线：from = 子，to = 父）。
+   *
+   * **多父是合法的**：同一个子可以同时挂在几个上级下面，给每个父级当分解依据；
+   * 每个父级运行时只管自己那份直系子集，不用管这个子上面还有几个别的父。
+   */
+  const taskParentsOf = computed(() => {
+    const m = new Map<number, number[]>();
+    // 库是 ORDER BY id，先建的边在前 —— 这个顺序决定「主父」，别打乱
     for (const e of edges.value) {
       if (e.kind !== "decompose") continue; // 只有分解边才是层级；先后边也是 task→task，混进来会把先后当父子
       if (e.from_kind !== "task" || e.to_kind !== "task") continue;
       if (e.from_id === e.to_id) continue;
-      m.set(e.from_id, e.to_id); // from 的上级是 to
+      const arr = m.get(e.from_id);
+      if (!arr) m.set(e.from_id, [e.to_id]); // from 的上级是 to
+      else if (!arr.includes(e.to_id)) arr.push(e.to_id);
     }
     return m;
   });
 
-  /** 任务的层级深度（根 = 0）；遇环也不会死循环 */
-  function taskDepth(id: number): number {
-    const parentOf = taskParentOf.value;
-    const seen = new Set<number>([id]);
-    let cur = id;
-    let d = 0;
-    while (d < 30) {
-      const p = parentOf.get(cur);
-      if (p == null || seen.has(p)) break;
-      seen.add(p);
-      cur = p;
-      d++;
+  /**
+   * 主父：多父时取**最早建的那条**父边。
+   *
+   * ⚠️ 编号（numbering.ts）、层级深度、拖父级带走下级、甘特缩进都必须有唯一答案，
+   * 所以这些地方只认主父；完整的多父列表用 taskParentsOf（AI 上下文要看到全部）。
+   * 必须取「第一条」而不是最后一条：numbering.ts 用 `parent.has()` 取第一条，
+   * 两边不一致就会「编号按 T1 算、层级按 T1.1 算」。
+   */
+  const taskParentOf = computed(() => {
+    const m = new Map<number, number>();
+    for (const [kid, ps] of taskParentsOf.value) {
+      const first = ps[0];
+      if (first != null) m.set(kid, first);
     }
-    return d;
+    return m;
+  });
+
+  /**
+   * 所有任务的层级深度（根 = 0）。
+   *
+   * 多父时取**最深的**那条路径：同一个子既挂在浅父、又挂在深父下面，
+   * 按浅的算就会被折进浅的那一支，收起深父时它反而"凭空消失"。
+   * 环已被连线守卫拦住，这里只做兜底不死循环。
+   */
+  const taskDepthMap = computed(() => {
+    const parents = taskParentsOf.value;
+    const memo = new Map<number, number>();
+    const busy = new Set<number>();
+    const walk = (cur: number): number => {
+      const hit = memo.get(cur);
+      if (hit != null) return hit;
+      if (busy.has(cur)) return 0; // 环兜底：当成根
+      busy.add(cur);
+      let d = 0;
+      for (const p of parents.get(cur) ?? []) {
+        const cand = Math.min(walk(p) + 1, 30);
+        if (cand > d) d = cand;
+      }
+      busy.delete(cur);
+      memo.set(cur, d);
+      return d;
+    };
+    for (const t of allTasks.value) walk(t.id);
+    return memo;
+  });
+
+  function taskDepth(id: number): number {
+    return taskDepthMap.value.get(id) ?? 0;
   }
 
   /** 某任务的全部后代（层序：父在前、子在后），用于「拖父任务时下级跟着走」 */
@@ -467,7 +539,7 @@ export const useBoardStore = defineStore("board", () => {
     theme, loaded, splitRatio,
     filterSearch, filterPriority, filterTags, hasFilter, matchFilter, totalTaskCount,
     allTasks, tagOf, fileById, sortedCol, visibleCount,
-    taskParentOf, taskDepth, taskDescendants, taskChildCount,
+    taskParentOf, taskParentsOf, taskDepth, taskDescendants, taskChildCount,
     toggleDone, setDates, setProgress, setBarColor, setDeliverFmt, colProgress, projectProgress, overdueTasks,
     taskNumbers, numberOf,
     taskRefs, refsOfTask, tasksUsingNote, refLevelOf, setRef, dropRef,

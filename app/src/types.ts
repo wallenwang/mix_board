@@ -71,6 +71,8 @@ export interface BoardNote {
   role: string;
   /** 特殊分组：candidates 候选组 / versions 版本组，空 = 普通分组 */
   group_kind: string;
+  /** 有值 = 在回收站里（删除时间），null/缺省 = 正常卡片 */
+  deleted_at?: string | null;
 }
 
 /** 连线的关系类型。默认分解，老数据全是这个，升级后观感不变 */
@@ -108,6 +110,15 @@ export interface TaskRef {
   point: string;
 }
 
+/** 回收站里的白板卡片（软删除：deleted_at 有值才算在回收站） */
+export interface NoteTrashItem {
+  id: number;
+  text: string;
+  kind: string;
+  file_name: string | null;
+  deleted_at: string | null;
+}
+
 /** 白板上传的资料（文件实体在应用数据目录 assets/ 下） */
 export interface WbFile {
   id: number;
@@ -118,6 +129,41 @@ export interface WbFile {
   size: number;
   path: string;
   created_at: string;
+}
+
+/** 本机探测到的 agent 命令行（ACP 后端） */
+export interface AiBackend {
+  id: string;
+  name: string;
+  /** 可执行文件绝对路径，或在 PATH 里的命令名 */
+  exe: string;
+  /** 进入 ACP 模式的参数，如 ["acp"] / ["--profile","acp"] */
+  args: string[];
+  version: string;
+}
+
+/** agent 会话里可选的一个模型 */
+export interface AiModel {
+  /** 传给 session/set_config_option 的值，如 deepseek/deepseek-flash */
+  value: string;
+  name: string;
+  /** 免费额度模型：额度用完会直接报错 */
+  free: boolean;
+}
+
+/** out/ 目录里的一个产物文件 */
+export interface AiOutput {
+  name: string;
+  path: string;
+  size: number;
+}
+
+/** 已收进资料库的 AI 产物（拿到 id 就能直接建白板卡片） */
+export interface AiImported {
+  id: number;
+  name: string;
+  mime: string;
+  size: number;
 }
 
 /** 写作模块的文档：body 直接就是 Markdown 源文 */
